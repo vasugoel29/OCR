@@ -1,0 +1,173 @@
+# OCR Pipeline Configuration
+
+# Image Quality Gate Thresholds (Relaxed for real-world scans)
+quality:
+  min_resolution: 200  # Minimum DPI equivalent (lowered for phone scans)
+  min_blur_score: 50.0  # Laplacian variance threshold (lowered)
+  min_brightness: 20  # Minimum mean pixel intensity (lowered)
+  max_brightness: 240  # Maximum mean pixel intensity (increased)
+  min_contrast_ratio: 0.2  # Minimum contrast ratio (much lower for scanned docs)
+  min_edge_density: 0.005  # Minimum edge density (lowered)
+  
+  # Quality score weights
+  weights:
+    blur: 0.35
+    brightness: 0.20
+    resolution: 0.25
+    contrast: 0.20
+
+# Preprocessing Configuration
+preprocessing:
+  enable_skew_correction: true
+  max_skew_angle: 45  # degrees
+  enable_perspective_correction: true
+  enable_illumination_normalization: true
+  enable_noise_removal: true
+  
+  # CLAHE parameters
+  clahe_clip_limit: 2.0
+  clahe_tile_grid_size: [8, 8]
+  
+  # Noise removal
+  median_blur_ksize: 3
+  bilateral_d: 9
+  bilateral_sigma_color: 75
+  bilateral_sigma_space: 75
+
+# OCR Engine Configuration
+ocr:
+  # Language support: eng (English), hin (Hindi), eng+hin (both)
+  # Install Hindi: sudo apt-get install tesseract-ocr-hin
+  language: 'eng+hin'  # Support both English and Hindi
+  tesseract_config: '--oem 3 --psm 3'  # LSTM OCR, auto page segmentation
+  min_word_confidence: 40
+  min_words_detected: 5
+  stopwords: ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for']
+  
+  # Confidence aggregation weights
+  numeric_token_weight: 1.5
+  alpha_token_weight: 1.0
+  stopword_weight: 0.3
+
+# Semantic Validation Rules
+semantic:
+  invoice:
+    required_fields: ['invoice_number', 'date', 'total_amount']
+    optional_fields: ['vendor_name', 'subtotal', 'tax', 'due_date']
+    
+    # Field patterns (regex)
+    patterns:
+      invoice_number: '[A-Z0-9-]{6,20}'
+      amount: '\d+\.?\d{0,2}'
+      date: '\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'
+    
+    # Validation rules
+    min_amount: 0.01
+    max_amount: 1000000.0
+    
+  id_document:
+    required_fields: ['id_number', 'name', 'date_of_birth']
+    optional_fields: ['expiry_date', 'issue_date', 'address']
+    
+    # Field patterns
+    patterns:
+      id_number: '[A-Z0-9]{8,15}'
+      name: '[A-Z][a-z]+(?: [A-Z][a-z]+)+'
+      date: '\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'
+
+# Layout Validation
+layout:
+  invoice:
+    anchors:
+      - keyword: 'invoice'
+        region: 'top'  # top, bottom, left, right, center
+        tolerance: 0.3  # 30% of image dimension
+      - keyword: 'total'
+        region: 'bottom'
+        tolerance: 0.3
+      - keyword: 'date'
+        region: 'top'
+        tolerance: 0.3
+    
+    min_anchors_required: 2
+    
+  id_document:
+    anchors:
+      - keyword: 'name'
+        region: 'top'
+        tolerance: 0.3
+      - keyword: 'date of birth'
+        region: 'center'
+        tolerance: 0.4
+      - keyword: 'id'
+        region: 'top'
+        tolerance: 0.3
+    
+    min_anchors_required: 2
+    photo_region: 'left'  # Expected photo location
+
+# Statistical Consistency Checks
+consistency:
+  invoice:
+    enable_arithmetic_check: true
+    arithmetic_tolerance: 0.02  # 2% tolerance for rounding
+    enable_date_validation: true
+    max_future_days: 30  # Allow invoices dated up to 30 days in future
+    
+  id_document:
+    enable_date_validation: true
+    require_expiry_after_issue: true
+    min_age: 0  # Minimum age for ID holder
+    max_age: 150
+
+# Multi-Stage Scoring Weights
+scoring:
+  weights:
+    image_quality: 0.20
+    ocr_confidence: 0.25
+    semantic_validity: 0.25
+    layout_validity: 0.15
+    consistency: 0.15
+  
+  # Field-level importance weights
+  field_weights:
+    invoice:
+      invoice_number: 1.5
+      total_amount: 2.0
+      date: 1.5
+      vendor_name: 1.0
+      subtotal: 1.2
+      tax: 1.2
+    
+    id_document:
+      id_number: 2.0
+      name: 1.8
+      date_of_birth: 1.5
+      expiry_date: 1.3
+
+# Decision Thresholds (Adjusted for real-world usage)
+decision:
+  accept_threshold: 0.75  # Lowered from 0.85
+  review_threshold: 0.50  # Lowered from 0.60
+  reject_threshold: 0.50
+  
+  # Hard rejection rules (relaxed for real-world scans)
+  hard_reject:
+    no_text_detected: true
+    quality_gate_failed: false  # Don't hard reject on quality - let scoring decide
+    mandatory_field_missing: false  # Don't hard reject - partial extraction is useful
+    excessive_non_alphanumeric: 0.85  # Increased tolerance
+
+# Batch Processing
+batch:
+  max_workers: 4  # Parallel processing workers
+  chunk_size: 10  # Documents per batch
+  enable_async: true
+
+# Logging
+logging:
+  level: 'INFO'  # DEBUG, INFO, WARNING, ERROR
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: 'ocr_pipeline.log'
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
