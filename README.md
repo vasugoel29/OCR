@@ -1,27 +1,31 @@
 # OCR Pipeline
 
-Production-ready OCR system for processing invoices and ID documents with multi-stage validation.
+Production-ready OCR system for processing invoices and ID documents with multi-stage validation, powered by PaddleOCR.
 
 ## Quick Start
 
 ### Installation
 
 ```bash
-# Install Tesseract OCR
-sudo apt-get update
-sudo apt-get install tesseract-ocr tesseract-ocr-hin
-
 # Install Python dependencies
 pip install -r requirements.txt
 ```
 
 ### Usage
 
-#### 1. Process ID Documents (Aadhaar, PAN, etc.)
+#### 1. Auto-Detect Document Type (Recommended)
+
+The pipeline automatically detects whether a document is an ID card or invoice:
+
+```bash
+python3 -m src.pipeline document.jpg
+```
+
+#### 2. Process ID Documents (Aadhaar, PAN, etc.)
 
 The system uses a specialized **Dual-Pass OCR** strategy for ID cards:
-1.  **Pass 1 (Raw Deskewed)**: Extracts accurate numbers (Aadhaar, IDs).
-2.  **Pass 2 (Enhanced)**: Extracts clearer text (Names, Addresses).
+1.  **Pass 1 (Standard)**: Initial OCR extraction.
+2.  **Pass 2 (Enhanced)**: High-resolution preprocessing with deskewing and adaptive thresholding.
 3.  **Merge**: Combines best results from both passes.
 
 ```bash
@@ -36,20 +40,26 @@ python3 -m src.pipeline aadhaar.jpg --type id_document
 - `address` (if legible)
 - `vid` (Virtual ID)
 
-#### 2. Process Invoices
-
-Standard pipeline for financial documents:
+#### 3. Process Invoices
 
 ```bash
 python3 -m src.pipeline invoice.jpg --type invoice
 ```
 
-#### 3. JSON Output
+#### 4. Debug with Raw Text Output
+
+View the raw OCR text extracted from the document:
+
+```bash
+python3 -m src.pipeline document.jpg --show-text
+```
+
+#### 5. JSON Output
 
 Save full results to a JSON file:
 
 ```bash
-python3 -m src.pipeline document.jpg --type id_document --output result.json
+python3 -m src.pipeline document.jpg --output result.json
 ```
 
 ## Python API
@@ -60,30 +70,47 @@ from src.pipeline import OCRPipeline
 # Initialize pipeline
 pipeline = OCRPipeline('config.yaml')
 
-# Process ID document
-result = pipeline.process_document('aadhaar.jpg', document_type='id_document')
+# Process with auto-detection
+result = pipeline.process_document('document.jpg', document_type='auto')
 
-if result.decision != 'reject':
-    print("✅ Extraction Successful")
-    print(f"Name: {result.extracted_fields.get('name')}")
-    print(f"Aadhaar: {result.extracted_fields.get('aadhaar_number')}")
-else:
-    print(f"❌ Rejected: {result.decision_result.reasons}")
+# Access results
+print(f"Decision: {result.decision}")
+print(f"Confidence: {result.confidence.final_score:.2f}")
+print(f"Extracted Fields: {result.extracted_fields}")
+
+# Convert to dictionary for serialization
+result_dict = result.to_dict()
 ```
 
 ## Features
 
-- **Dual-Pass OCR Architecture**:
-  - Handles real-world ID cards with noise, blur, and skew.
-  - Automatically runs OCR on both generic and aggressively enhanced images.
-  - Merges results to get 100% Aadhaar number accuracy in tests.
-- **Robustness**: 
-  - **Deskewing**: Uses Hough Line Transform to fix rotation.
-  - **Enhancement**: Adaptive thresholding and denoising for text clarity.
-- **Validation Suite**: 
-  - Image Quality (Blur, Glare, Contrast)
-  - Semantic Validation (Date formats, ID patterns)
-  - Cross-Field Consistency Checks
+### Core Capabilities
+- **PaddleOCR Engine**: High-accuracy OCR with support for English and Hindi
+- **Automatic Document Classification**: Detects ID documents vs invoices using keyword and pattern analysis
+- **Dual-Pass OCR for IDs**: Combines standard and enhanced preprocessing for optimal field extraction
+- **Robust Field Extraction**: Handles OCR noise (merged text, special characters, missing separators)
+
+### Advanced Validation
+- **9-Component Confidence Scoring**:
+  - Image Quality Score
+  - OCR Confidence Score
+  - Regex Pattern Match Score
+  - Fuzzy Matching Score
+  - Layout Analysis Score
+  - Key-Value Pair Score
+  - Cross-Field Consistency Score
+  - Schema Compliance Score
+  - Token Distribution Score
+
+- **Multi-Stage Decision Engine**:
+  - `accept`: High confidence (≥0.85)
+  - `review`: Medium confidence (0.60-0.85) - requires manual review
+  - `reject`: Low confidence or failed validation
+
+### Image Preprocessing
+- **Quality Gate**: Checks blur, brightness, contrast, and edge density
+- **ID Enhancement**: High-resolution upscaling (1600px), denoising, CLAHE contrast enhancement
+- **Deskewing**: Hough Line Transform for rotation correction
 
 ## Configuration
 
@@ -92,19 +119,27 @@ Edit `config.yaml` to adjust thresholds:
 ```yaml
 decision:
   accept_threshold: 0.85    # Auto-accept confidence
-  review_threshold: 0.60    # Flag for manual revies
+  review_threshold: 0.60    # Flag for manual review
 
-ocr:
-  language: 'eng+hin'       # Enable Hindi support
+paddle_ocr:
+  lang: 'en'                # Language model
+  use_angle_cls: true       # Enable rotation detection
+  use_gpu: false            # Set to true if GPU available
+
+quality:
+  min_blur_score: 100.0     # Minimum sharpness
+  min_brightness: 20        # Brightness range
+  max_brightness: 240
 ```
 
 ## Troubleshooting
 
 - **Low Confidence Scores**: 
-  - Ensure image is in focus (`blur_score > 300`).
-  - Ensure good contrast (`contrast_score > 0.3`).
-- **Wrong Orientation**: The system tries to deskew, but images rotated >45 degrees might need manual rotation.
-- **Missing Fields**: Check `config.yaml` to see if fields are marked mandatory.
+  - Ensure image is in focus (`blur_score > 100`)
+  - Ensure good contrast (`contrast_score > 0.2`)
+  - Check image resolution (minimum 640x480)
+- **Wrong Classification**: Use `--type` to force document type
+- **Missing Fields**: Check logs for extraction details, use `--show-text` to inspect raw OCR output
 
 ## Project Structure
 
@@ -112,11 +147,15 @@ ocr:
 OCR/
 ├── config.yaml              # Configuration settings
 ├── src/                    
-│   ├── pipeline.py         # Main entry point & orchestration
-│   ├── preprocessing/      # Image corrections (id_enhancer.py)
-│   ├── documents/         # Field extractors (aadhaar.py)
-│   ├── ocr/               # Tesseract wrapper
-│   └── quality/           # Quality checks
+│   ├── pipeline.py          # Main orchestration
+│   ├── classification.py    # Document type detection
+│   ├── preprocessing/       # Image enhancement (id_enhancer.py)
+│   ├── documents/           # Field extractors (aadhaar.py, invoice.py)
+│   ├── ocr/                 # PaddleOCR wrapper
+│   ├── quality/             # Image quality assessment
+│   ├── scoring/             # Confidence scoring & decision engine
+│   └── validation/          # Post-OCR validation modules
+└── tests/                   # Unit tests
 ```
 
 ## License
