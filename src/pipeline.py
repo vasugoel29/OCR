@@ -14,10 +14,15 @@ from .utils import load_config, setup_logging, load_image, clean_text
 from .quality import ImageQualityAssessor, QualityMetrics
 from .preprocessing import PreprocessingPipeline
 from .preprocessing.id_enhancer import IDDocumentEnhancer
-from .ocr import TesseractEngine, OCRResult
+from .validation.normalization import TokenNormalizer
+from .validation.anchors import AnchorValidator
+from .validation.distribution import DistributionAnalyzer
+from .validation.key_value import KeyValueExtractor
+from .ocr import PaddleOCREngine, OCRResult
 from .documents import InvoiceProcessor, IDDocumentProcessor, BaseDocumentProcessor
 from .documents.aadhaar import AadhaarExtractor
 from .scoring import ConfidenceScorer, DecisionEngine, DocumentConfidence, DecisionResult, Decision
+from .classification import DocumentClassifier
 
 
 @dataclass
@@ -29,8 +34,9 @@ class PipelineResult:
     confidence: DocumentConfidence
     decision_result: DecisionResult
     extracted_fields: Dict
-    quality_metrics: QualityMetrics
-    ocr_result: OCRResult
+    quality_metrics: Dict # Changed to Dict
+    ocr_stats: Dict # Changed from ocr_result to ocr_stats dict
+    full_text: str = "" # Added
     processing_time: float = 0.0
     error: Optional[str] = None
     
@@ -43,24 +49,13 @@ class PipelineResult:
             'confidence_scores': self.confidence.to_dict(),
             'decision_details': self.decision_result.to_dict(),
             'extracted_fields': self.extracted_fields,
-            'quality_metrics': {
-                'blur_score': self.quality_metrics.blur_score,
-                'brightness_score': self.quality_metrics.brightness_score,
-                'resolution_score': self.quality_metrics.resolution_score,
-                'contrast_score': self.quality_metrics.contrast_score,
-                'edge_density': self.quality_metrics.edge_density,
-                'composite_score': self.quality_metrics.composite_score,
-                'passed': self.quality_metrics.passed
-            },
-            'ocr_stats': {
-                'total_words': self.ocr_result.total_words,
-                'mean_confidence': self.ocr_result.mean_confidence,
-                'low_confidence_words': self.ocr_result.low_confidence_words,
-                'numeric_words': self.ocr_result.numeric_words
-            },
+            'quality_metrics': self.quality_metrics, # Already a dict
+            'ocr_stats': self.ocr_stats,
+            'full_text': self.full_text,
             'processing_time': self.processing_time,
             'error': self.error
         }
+
 
 
 class OCRPipeline:
@@ -82,9 +77,16 @@ class OCRPipeline:
         # Initialize components
         self.quality_assessor = ImageQualityAssessor(self.config.get('quality', {}))
         self.preprocessing_pipeline = PreprocessingPipeline(self.config.get('preprocessing', {}))
-        self.ocr_engine = TesseractEngine(self.config.get('ocr', {}))
+        self.ocr_engine = PaddleOCREngine(self.config.get('ocr', {}))
         self.confidence_scorer = ConfidenceScorer(self.config.get('scoring', {}))
         self.decision_engine = DecisionEngine(self.config.get('decision', {}))
+        self.classifier = DocumentClassifier()
+        
+        # Initialize validation components
+        self.anchor_validator = AnchorValidator(self.config)
+        self.distribution_analyzer = DistributionAnalyzer(self.config)
+        self.kv_extractor = KeyValueExtractor(self.config)
+        self.token_normalizer = TokenNormalizer()
         
         # Initialize document processors
         self.invoice_processor = InvoiceProcessor(self.config)
@@ -131,34 +133,68 @@ class OCRPipeline:
             # Stage 3: OCR
             self.logger.debug("Stage 3: OCR Extraction")
             
-            if document_type == 'id_document':
-                # Dual-pass OCR for ID documents
-                self.logger.info("Using dual-pass OCR for ID document")
+            # Run standard OCR first (needed for classification and general text)
+            ocr_result = self.ocr_engine.extract_text(processed_image)
+            
+            # Auto-classify if needed
+            if document_type == 'auto':
+                self.logger.info("Auto-detecting document type...")
                 
-                # Pass 1: Standard raw image (but deskewed!)
-                # Use robust generic skew corrector (Hough lines) instead of simple minAreaRect
+                # If standard pass failed to find text, it might be a challenging ID document
+                # Try running the ID enhancement pass blindly to see if we find anything
+                if ocr_result.total_words == 0:
+                    self.logger.info("No text in standard pass. Trying ID enhancement for classification...")
+                    
+                    if hasattr(self.preprocessing_pipeline, 'corrector'):
+                        deskewed_image = self.preprocessing_pipeline.corrector.correct_skew(image)
+                    else:
+                        deskewed_image = image
+                        
+                    id_enhancer = IDDocumentEnhancer()
+                    enhanced_image = id_enhancer.enhance_for_ocr(deskewed_image)
+                    ocr_result_enh = self.ocr_engine.extract_text(enhanced_image)
+                    
+                    if ocr_result_enh.total_words > 0:
+                        ocr_result = ocr_result_enh  # Use this for classification
+                        self.logger.info(f"Enhancement found {ocr_result.total_words} words. Proceeding with classification.")
+                
+                if ocr_result.total_words == 0:
+                    self.logger.warning("No text detected even after enhancement, defaulting to 'invoice'")
+                    document_type = 'invoice'
+                else:
+                    document_type = self.classifier.classify(ocr_result.full_text)
+                    self.logger.info(f"Detected document type: {document_type}")
+            
+            primary_ocr_result = ocr_result
+            
+            # ID-Specific Enhanced OCR Pass (Dual Pass)
+            # If identified as ID document, run the deskew+enhance pass for better accuracy on specific fields
+            if document_type == 'id_document':
+                self.logger.info("Running enhance pass for ID document")
+                
+                # Pass 1 was already done above (OCRResult) on standard processed image
+                # Pass 2: Enhanced image
+                # Use robust skew correction for the base of enhancement
                 if hasattr(self.preprocessing_pipeline, 'corrector'):
                     deskewed_image = self.preprocessing_pipeline.corrector.correct_skew(image)
                 else:
-                    # Fallback if pipeline not initialized with corrector (unlikely)
                     deskewed_image = image
                 
-                ocr_result = self.ocr_engine.extract_text(deskewed_image)
-                
-                # Pass 2: Enhanced image
-                # Pass deskewed image to enhancer for better results
                 id_enhancer = IDDocumentEnhancer()
                 enhanced_image = id_enhancer.enhance_for_ocr(deskewed_image)
                 ocr_result_enh = self.ocr_engine.extract_text(enhanced_image)
                 
-                # Use result with more words as primary for confidence stats
+                # Use the pass with more detected words as primary for confidence stats
                 if ocr_result_enh.total_words > ocr_result.total_words:
                     primary_ocr_result = ocr_result_enh
-                else:
-                    primary_ocr_result = ocr_result
+                
+                # Note: We keep both results available for the AdhaarExtractor later logic
             else:
-                ocr_result = self.ocr_engine.extract_text(processed_image)
-                primary_ocr_result = ocr_result
+                 # Invoice or others - single pass is usually sufficient
+                 ocr_result_enh = None
+                 primary_ocr_result = ocr_result
+            
+            # Check if text was detected
             
             # Check if text was detected
             text_detected = primary_ocr_result.total_words > 0
@@ -178,8 +214,8 @@ class OCRPipeline:
                 # Extract from standard pass first
                 extracted_fields = aadhaar_extractor.extract_fields(ocr_result)
                 
-                # If Aadhaar number missing, try enhanced pass
-                if 'aadhaar_number' not in extracted_fields:
+                # If Aadhaar number missing, try enhanced pass if available
+                if 'aadhaar_number' not in extracted_fields and ocr_result_enh:
                     fields_enh = aadhaar_extractor.extract_fields(ocr_result_enh)
                     if 'aadhaar_number' in fields_enh:
                         extracted_fields['aadhaar_number'] = fields_enh['aadhaar_number']
@@ -188,10 +224,11 @@ class OCRPipeline:
                 
                 # Merge other fields from enhanced pass if missing in standard
                 # (Name, DOB, Gender often better in enhanced)
-                fields_enh = aadhaar_extractor.extract_fields(ocr_result_enh)
-                for key in ['name', 'date_of_birth', 'gender', 'address']:
-                    if key not in extracted_fields and key in fields_enh:
-                        extracted_fields[key] = fields_enh[key]
+                if ocr_result_enh:
+                    fields_enh = aadhaar_extractor.extract_fields(ocr_result_enh)
+                    for key in ['name', 'date_of_birth', 'gender', 'address']:
+                        if key not in extracted_fields and key in fields_enh:
+                            extracted_fields[key] = fields_enh[key]
                 
                 # Use ID processor for subsequent validation steps
                 processor = self.id_processor
@@ -220,21 +257,51 @@ class OCRPipeline:
             consistency_validation = processor.check_consistency(extracted_fields)
             consistency_score = consistency_validation['consistency_score']
             
-            # Stage 5: Multi-Stage Confidence Scoring
-            self.logger.debug("Stage 5: Confidence Scoring")
+            # Stage 5: Advanced Validation Layer
+            self.logger.debug("Stage 5: Post-OCR Validation")
+            
+            # 5.1 Token Normalization (in-place or separate? keeping raw text for now, using norm helper)
+            # 5.2 Regex Score (implicit in semantic) -> we'll explicitly calculate one
+            # Just approximation based on extracted vs required
+            regex_score = len(extracted_fields) / len(processor.get_required_fields()) if processor.get_required_fields() else 1.0
+            
+            # 5.3 Fuzzy Anchors
+            fuzzy_score, anchor_details = self.anchor_validator.validate_anchors(ocr_result.full_text, document_type)
+            
+            # 5.4 Layout (already done)
+            
+            # 5.5 KV Proximity
+            kv_score = self.kv_extractor.validate_kv_pairs(ocr_result, document_type)
+            
+            # 5.6 Consistency (already done)
+            
+            # 5.7 Distribution
+            distribution_score, dist_metrics = self.distribution_analyzer.analyze(ocr_result.full_text, document_type)
+            
+            # 5.8 Schema Completeness
+            required_count = len(required_fields)
+            present_count = sum(1 for f in required_fields if f in extracted_fields)
+            schema_score = present_count / required_count if required_count > 0 else 1.0
+            
+            # Stage 6: Multi-Stage Confidence Scoring
+            self.logger.debug("Stage 6: Confidence Scoring")
             document_confidence = self.confidence_scorer.calculate_document_confidence(
                 image_quality_score=quality_metrics.composite_score,
                 ocr_confidence_score=ocr_confidence_score,
-                semantic_score=semantic_score,
+                regex_score=regex_score,
+                fuzzy_score=fuzzy_score,
                 layout_score=layout_score,
-                consistency_score=consistency_score
+                kv_score=kv_score,
+                consistency_score=consistency_score,
+                schema_score=schema_score,
+                distribution_score=distribution_score
             )
             
             # Calculate non-alphanumeric ratio
             non_alphanumeric_ratio = self._calculate_non_alphanumeric_ratio(ocr_result.full_text)
             
-            # Stage 6: Decision
-            self.logger.debug("Stage 6: Decision Making")
+            # Stage 7: Decision
+            self.logger.debug("Stage 7: Decision Making")
             decision_result = self.decision_engine.make_decision(
                 document_confidence=document_confidence,
                 quality_passed=quality_metrics.passed,
@@ -257,9 +324,11 @@ class OCRPipeline:
                 confidence=document_confidence,
                 decision_result=decision_result,
                 extracted_fields=extracted_fields,
-                quality_metrics=quality_metrics,
-                ocr_result=ocr_result,
-                processing_time=processing_time
+                quality_metrics=quality_metrics.to_dict(),
+                ocr_stats=primary_ocr_result.get_stats(),
+                full_text=primary_ocr_result.full_text,
+                processing_time=processing_time,
+                error=None
             )
         
         except Exception as e:
@@ -267,11 +336,12 @@ class OCRPipeline:
             self.logger.error(f"Error processing document {image_path}: {str(e)}", exc_info=True)
             
             # Return error result
+            # Return error result
             return PipelineResult(
                 document_path=str(image_path),
                 document_type=document_type,
                 decision='error',
-                confidence=DocumentConfidence(0, 0, 0, 0, 0, 0),
+                confidence=DocumentConfidence(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
                 decision_result=DecisionResult(
                     decision=Decision.REJECT,
                     confidence_score=0.0,
@@ -279,8 +349,9 @@ class OCRPipeline:
                     hard_rejection=True
                 ),
                 extracted_fields={},
-                quality_metrics=QualityMetrics(0, 0, 0, 0, 0, 0, False, [str(e)]),
-                ocr_result=OCRResult('', 0.0),
+                quality_metrics={'error': str(e)}, # Manual dict
+                ocr_stats={'error': str(e)}, # Manual dict
+                full_text="", # Manual empty
                 processing_time=processing_time,
                 error=str(e)
             )
@@ -325,7 +396,7 @@ class OCRPipeline:
                         document_path=str(path),
                         document_type=document_type,
                         decision='error',
-                        confidence=DocumentConfidence(0, 0, 0, 0, 0, 0),
+                        confidence=DocumentConfidence(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
                         decision_result=DecisionResult(
                             decision=Decision.REJECT,
                             confidence_score=0.0,
@@ -383,10 +454,11 @@ def main():
     
     parser = argparse.ArgumentParser(description='OCR Pipeline for Invoice and ID Documents')
     parser.add_argument('image_path', help='Path to document image')
-    parser.add_argument('--type', choices=['invoice', 'id_document'], default='invoice',
-                       help='Document type')
+    parser.add_argument('--type', choices=['invoice', 'id_document', 'auto'], default='auto',
+                       help='Document type (default: auto)')
     parser.add_argument('--config', default='config.yaml', help='Path to configuration file')
     parser.add_argument('--output', help='Output JSON file path')
+    parser.add_argument('--show-text', action='store_true', help='Print full OCR text to stdout')
     
     args = parser.parse_args()
     
@@ -394,19 +466,28 @@ def main():
     pipeline = OCRPipeline(args.config)
     
     # Process document
-    result = pipeline.process_document(args.image_path, args.type)
-    
-    # Convert to dict
-    result_dict = result.to_dict()
-    
-    # Print result
-    print(json.dumps(result_dict, indent=2))
-    
-    # Save to file if specified
-    if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result_dict, f, indent=2)
-        print(f"\nResult saved to {args.output}")
+    try:
+        result = pipeline.process_document(args.image_path, document_type=args.type)
+        
+        # Print full text if requested
+        if args.show_text and hasattr(result, 'full_text') and result.full_text:
+            print("\n" + "="*50)
+            print("EXTRACTED TEXT")
+            print("="*50)
+            print(result.full_text)
+            print("="*50 + "\n")
+            
+        print(json.dumps(result.to_dict(), indent=2))
+        
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(result.to_dict(), f, indent=2)
+            print(f"\nResult saved to {args.output}")
+            
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':

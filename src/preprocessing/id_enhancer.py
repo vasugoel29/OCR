@@ -25,8 +25,8 @@ class IDDocumentEnhancer:
         Returns:
             Enhanced image optimized for OCR
         """
-        # Step 1: Resize if too small
-        image = self._resize_if_needed(image)
+        # Step 1: Resize for better detail (increased resolution)
+        image = self._resize_if_needed(image, min_width=1600)
         
         # Step 1.5: Deskew
         image = self.deskew_document(image)
@@ -74,7 +74,7 @@ class IDDocumentEnhancer:
         """
         return self.corrector.correct_skew(image)
     
-    def _resize_if_needed(self, image: np.ndarray, min_width: int = 1200) -> np.ndarray:
+    def _resize_if_needed(self, image: np.ndarray, min_width: int = 1600) -> np.ndarray:
         """Resize image if it's too small.
         
         Args:

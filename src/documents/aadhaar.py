@@ -64,6 +64,7 @@ class AadhaarExtractor:
         
         return fields
     
+    
     def _extract_aadhaar_number(self, text: str, ocr_result: OCRResult) -> Optional[str]:
         """Extract 12-digit Aadhaar number with multiple strategies.
         
@@ -74,8 +75,8 @@ class AadhaarExtractor:
         Returns:
             Aadhaar number or None
         """
-        # Strategy 1: Look for 12-digit number with spaces (XXXX XXXX XXXX)
-        pattern1 = r'\b(\d{4})\s+(\d{4})\s+(\d{4})\b'
+        # Strategy 1: Look for 12-digit number with spaces, hyphens, or DOTS
+        pattern1 = r'\b(\d{4})[\s.-]+(\d{4})[\s.-]+(\d{4})\b'
         matches = re.findall(pattern1, text)
         for match in matches:
             aadhaar = ''.join(match)
@@ -88,18 +89,18 @@ class AadhaarExtractor:
         for match in matches:
             if self._validate_aadhaar(match):
                 return match
-        
-        # Strategy 3: Look in word-level data for sequences
+                
+        # Strategy 3: Look for spaced digits (e.g. 4 8 2 8 ...)
         if ocr_result.words:
             aadhaar = self._extract_from_words(ocr_result.words)
             if aadhaar:
                 return aadhaar
         
         # Strategy 4: Look for numbers near "Aadhaar" keyword
-        aadhaar_pattern = r'(?:aadhaar|आधार).*?(\d{4}\s*\d{4}\s*\d{4})'
+        aadhaar_pattern = r'(?:aadhaar|आधार).*?(\d{4}[\s.-]*\d{4}[\s.-]*\d{4})'
         match = re.search(aadhaar_pattern, text, re.IGNORECASE | re.DOTALL)
         if match:
-            aadhaar = re.sub(r'\s+', '', match.group(1))
+            aadhaar = re.sub(r'[\s.-]+', '', match.group(1))
             if self._validate_aadhaar(aadhaar):
                 return aadhaar
         
@@ -117,9 +118,10 @@ class AadhaarExtractor:
         # Look for sequence of 3 4-digit numbers
         digit_words = []
         for word in words:
-            text = word.text.strip()
-            if text.isdigit() and len(text) == 4:
-                digit_words.append(text)
+            # Clean punctuation that might stick to numbers (e.g. "4828-")
+            cleaned = re.sub(r'[^\d]', '', word.text)
+            if len(cleaned) == 4:
+                digit_words.append(cleaned)
         
         # Check consecutive sequences
         for i in range(len(digit_words) - 2):
@@ -128,7 +130,7 @@ class AadhaarExtractor:
                 return aadhaar
         
         return None
-    
+
     def _validate_aadhaar(self, number: str) -> bool:
         """Validate Aadhaar number format.
         
@@ -149,7 +151,7 @@ class AadhaarExtractor:
         # Basic Verhoeff algorithm check (simplified)
         # In production, implement full Verhoeff validation
         return True
-    
+
     def _extract_vid(self, text: str) -> Optional[str]:
         """Extract VID (Virtual ID) if present.
         
@@ -168,7 +170,7 @@ class AadhaarExtractor:
                 return vid
         
         return None
-    
+
     def _extract_name(self, text: str, ocr_result: OCRResult) -> Optional[str]:
         """Extract person's name.
         
@@ -180,15 +182,22 @@ class AadhaarExtractor:
             Name or None
         """
         # Strategy 1: Look for name after keywords
+        # Allow noise chars (like @, :) between words
         name_patterns = [
             r'(?:name|नाम)\s*:?\s*([A-Za-z\s]{3,50})',
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',  # Capitalized words
+            r'([A-Z][a-z]+(?:[\s@:.,]*[A-Z][a-z]+)+)',  # Capitalized words with noise or merged
         ]
         
         for pattern in name_patterns:
             match = re.search(pattern, text)
             if match:
-                name = match.group(1).strip()
+                raw_name = match.group(1).strip()
+                # Clean up noise chars to get pure name
+                name = re.sub(r'[@:.,]', ' ', raw_name)
+                # Split CamelCase/Merged words if attached
+                name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
+                name = re.sub(r'\s+', ' ', name).strip()
+                
                 # Filter out common false positives
                 if self._is_valid_name(name):
                     return name
@@ -198,9 +207,10 @@ class AadhaarExtractor:
             for line in ocr_result.lines[1:4]:  # Skip first line (usually "Aadhaar")
                 text_line = line.text.strip()
                 # Look for capitalized words
-                if re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+', text_line):
-                    if self._is_valid_name(text_line):
-                        return text_line
+                if re.match(r'^[A-Z][a-z]+.*[A-Z][a-z]+', text_line):
+                    name_cand = re.sub(r'([a-z])([A-Z])', r'\1 \2', text_line)
+                    if self._is_valid_name(name_cand):
+                        return name_cand
         
         return None
     
@@ -237,28 +247,27 @@ class AadhaarExtractor:
         return True
     
     def _extract_dob(self, text: str) -> Optional[str]:
-        """Extract date of birth.
-        
-        Args:
-            text: Full OCR text
-            
-        Returns:
-            DOB string or None
-        """
-        # Look for DOB with various formats
+        """Extract Date of Birth."""
+        # Common formats: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
+        # Also handle OCR noise like "DOP" instead of "DOB" and missing separators
         dob_patterns = [
-            r'(?:dob|date\s+of\s+birth|जन्म\s+तिथि)\s*:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-            r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',  # Any date format
+            r'(?:dob|date\s+of\s+birth|जन्म\s+तिथि|dop)\s*:?\s*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})',
+            r'(?:dob|date\s+of\s+birth|जन्म\s+तिथि|dop)\s*:?\s*(\d{8})',
+            r'(\d{1,2}[/.-]\d{1,2}[/.-]\d{4})',  # Any date format
         ]
         
         for pattern in dob_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                dob = match.group(1)
-                # Validate it's a reasonable date
-                if self._is_valid_date(dob):
-                    return dob
-        
+                date_str = match.group(1)
+                # If 8 digits check if it's DDMMYYYY
+                if len(date_str) == 8 and date_str.isdigit():
+                     # Insert separators for validation
+                     date_str = f"{date_str[:2]}/{date_str[2:4]}/{date_str[4:]}"
+                
+                if self._is_valid_date(date_str):
+                    return date_str
+                    
         return None
     
     def _is_valid_date(self, date_str: str) -> bool:

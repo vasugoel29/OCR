@@ -21,6 +21,11 @@ class QualityMetrics:
     composite_score: float
     passed: bool
     failure_reasons: list
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary."""
+        from dataclasses import asdict
+        return asdict(self)
 
 
 class ImageQualityAssessor:

@@ -36,6 +36,15 @@ class OCRResult:
     low_confidence_words: int = 0
     numeric_words: int = 0
     
+    def get_stats(self) -> dict:
+        """Get OCR statistics."""
+        return {
+            'total_words': self.total_words,
+            'mean_confidence': self.mean_confidence,
+            'low_confidence_words': self.low_confidence_words,
+            'numeric_words': self.numeric_words
+        }
+
     def get_words_by_confidence(self, min_confidence: float) -> List[WordData]:
         """Get words above a confidence threshold.
         

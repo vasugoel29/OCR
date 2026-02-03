@@ -36,11 +36,14 @@ preprocessing:
 
 # OCR Engine Configuration
 ocr:
-  # Language support: eng (English), hin (Hindi), eng+hin (both)
-  # Install Hindi: sudo apt-get install tesseract-ocr-hin
-  language: 'eng+hin'  # Support both English and Hindi
-  tesseract_config: '--oem 3 --psm 3'  # LSTM OCR, auto page segmentation
-  min_word_confidence: 40
+  # PaddleOCR Configuration
+  paddle_ocr:
+    use_angle_cls: true
+    lang: 'en'  # 'en', 'ch', 'french', 'german', 'korean', 'japan'
+    use_gpu: false  # Set to true if GPU is available
+    show_log: false
+  
+  min_word_confidence: 60  # PaddleOCR usually has higher confidence
   min_words_detected: 5
   stopwords: ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for']
   
@@ -106,6 +109,30 @@ layout:
     min_anchors_required: 2
     photo_region: 'left'  # Expected photo location
 
+# Anchor Keywords (Fuzzy Matching)
+anchors:
+  invoice:
+    required: ['invoice', 'total', 'date', 'amount']
+    optional: ['tax', 'subtotal', 'vendor', 'gst', 'bill to']
+    threshold: 80  # Levenshtein similarity threshold (0-100)
+    
+  id_document:
+    required: ['name', 'dob', 'id', 'date of birth']
+    optional: ['address', 'gender', 'issue date', 'expiry']
+    threshold: 80
+
+# Token Distribution Profiles
+distribution:
+  invoice:
+    min_numeric_ratio: 0.10
+    max_special_char_ratio: 0.20
+    avg_word_length_range: [2, 10]
+    
+  id_document:
+    min_numeric_ratio: 0.05
+    max_special_char_ratio: 0.15
+    avg_word_length_range: [3, 12]
+
 # Statistical Consistency Checks
 consistency:
   invoice:
@@ -123,11 +150,15 @@ consistency:
 # Multi-Stage Scoring Weights
 scoring:
   weights:
-    image_quality: 0.20
-    ocr_confidence: 0.25
-    semantic_validity: 0.25
-    layout_validity: 0.15
-    consistency: 0.15
+    image_quality: 0.10
+    ocr_confidence: 0.15
+    regex_match: 0.10
+    fuzzy_match: 0.10
+    layout_validity: 0.10
+    kv_match: 0.10
+    consistency: 0.10
+    schema_completeness: 0.15
+    distribution: 0.10
   
   # Field-level importance weights
   field_weights:
@@ -145,18 +176,18 @@ scoring:
       date_of_birth: 1.5
       expiry_date: 1.3
 
-# Decision Thresholds (Adjusted for real-world usage)
+# Decision Thresholds
 decision:
-  accept_threshold: 0.75  # Lowered from 0.85
-  review_threshold: 0.50  # Lowered from 0.60
-  reject_threshold: 0.50
+  accept_threshold: 0.85
+  review_threshold: 0.60
+  reject_threshold: 0.60
   
-  # Hard rejection rules (relaxed for real-world scans)
+  # Hard rejection rules
   hard_reject:
     no_text_detected: true
-    quality_gate_failed: false  # Don't hard reject on quality - let scoring decide
-    mandatory_field_missing: false  # Don't hard reject - partial extraction is useful
-    excessive_non_alphanumeric: 0.85  # Increased tolerance
+    quality_gate_failed: true
+    mandatory_field_missing: true
+    excessive_non_alphanumeric: 0.85
 
 # Batch Processing
 batch:

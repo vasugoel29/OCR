@@ -1,26 +1,34 @@
-"""OCR engine integration using Tesseract (Approach 2)."""
+"""OCR engine integration using PaddleOCR."""
 
 import cv2
 import numpy as np
-import pytesseract
-from typing import Dict, List, Set
+from paddleocr import PaddleOCR
+from typing import Dict, List, Set, Tuple
 import re
 from .models import OCRResult, WordData, LineData
 
-
-class TesseractEngine:
-    """Tesseract OCR engine wrapper with confidence extraction."""
+class PaddleOCREngine:
+    """PaddleOCR engine wrapper with confidence extraction."""
     
     def __init__(self, config: Dict):
-        """Initialize Tesseract engine.
+        """Initialize PaddleOCR engine.
         
         Args:
             config: OCR configuration dictionary
         """
         self.config = config
-        self.language = config.get('language', 'eng')  # Default to English
-        self.tesseract_config = config.get('tesseract_config', '--oem 3 --psm 3')
-        self.min_word_confidence = config.get('min_word_confidence', 40)
+        paddle_config = config.get('paddle_ocr', {})
+        
+        # Initialize PaddleOCR
+        # use_angle_cls=True allows detecting rotated text
+        self.ocr = PaddleOCR(
+            use_angle_cls=paddle_config.get('use_angle_cls', True),
+            lang=paddle_config.get('lang', 'en'),
+            use_gpu=paddle_config.get('use_gpu', False),
+            show_log=paddle_config.get('show_log', False)
+        )
+        
+        self.min_word_confidence = config.get('min_word_confidence', 50)
         self.min_words_detected = config.get('min_words_detected', 5)
         
         # Load stopwords
@@ -32,7 +40,7 @@ class TesseractEngine:
         self.stopword_weight = config.get('stopword_weight', 0.3)
     
     def extract_text(self, image: np.ndarray) -> OCRResult:
-        """Extract text from image with word-level confidence.
+        """Extract text from image using PaddleOCR.
         
         Args:
             image: Input image (preprocessed)
@@ -40,111 +48,108 @@ class TesseractEngine:
         Returns:
             OCRResult object with detailed information
         """
-        # Get detailed OCR data
-        ocr_data = pytesseract.image_to_data(
-            image,
-            lang=self.language,
-            config=self.tesseract_config,
-            output_type=pytesseract.Output.DICT
-        )
+        # PaddleOCR expects RGB image usually, but handles BGR from cv2 fine.
+        # Ensure it's numpy array
         
-        # Parse OCR data
+        result = self.ocr.ocr(image, cls=True)
+        
         words = []
-        lines_dict = {}
+        lines = []
+        full_text_lines = []
         
-        n_boxes = len(ocr_data['text'])
-        for i in range(n_boxes):
-            text = ocr_data['text'][i].strip()
+        # Handle case where no text is found
+        if not result or result[0] is None:
+            return OCRResult(
+                full_text="",
+                mean_confidence=0.0,
+                words=[],
+                lines=[],
+                total_words=0,
+                low_confidence_words=0,
+                numeric_words=0
+            )
+
+        # Iterate over detected lines
+        # PaddleOCR result structure: [ [ [ [x1,y1], [x2,y2], ... ], (text, confidence) ], ... ]
+        for line_idx, line_res in enumerate(result[0]):
+            box, (text, confidence) = line_res
+            text = text.strip()
+            confidence = float(confidence) * 100  # Convert 0-1 to 0-100 scale to match Tesseract
             
-            # Skip empty text
             if not text:
                 continue
+                
+            # Convert box points to x, y, w, h
+            # box is [[x1,y1], [x2,y1], [x2,y2], [x1,y2]] (roughly)
+            box = np.array(box).astype(np.int32)
+            x_min = np.min(box[:, 0])
+            y_min = np.min(box[:, 1])
+            x_max = np.max(box[:, 0])
+            y_max = np.max(box[:, 1])
+            w = x_max - x_min
+            h = y_max - y_min
+            line_bbox = (int(x_min), int(y_min), int(w), int(h))
             
-            confidence = float(ocr_data['conf'][i])
+            full_text_lines.append(text)
             
-            # Skip very low confidence (likely noise)
-            if confidence < 0:
+            # Split line into words
+            line_words_tokens = text.split()
+            
+            # Estimate word bounding boxes
+            # We'll split the line width proportionally to word length (plus spaces)
+            total_chars = len(text)
+            if total_chars == 0:
                 continue
+                
+            avg_char_width = w / total_chars
+            current_x = x_min
             
-            # Extract bounding box
-            x = ocr_data['left'][i]
-            y = ocr_data['top'][i]
-            w = ocr_data['width'][i]
-            h = ocr_data['height'][i]
-            bbox = (x, y, w, h)
+            line_word_objects = []
             
-            # Get line and word numbers
-            line_num = ocr_data['line_num'][i]
-            word_num = ocr_data['word_num'][i]
+            for word_idx, token in enumerate(line_words_tokens):
+                token_len = len(token)
+                word_w = int(token_len * avg_char_width)
+                
+                # Check for numeric and stopword
+                is_numeric = self._is_numeric(token)
+                is_stopword = token.lower() in self.stopwords
+                
+                word_data = WordData(
+                    text=token,
+                    confidence=confidence, # Assign line confidence to words
+                    bbox=(int(current_x), int(y_min), int(word_w), int(h)),
+                    line_num=line_idx + 1,
+                    word_num=word_idx + 1,
+                    is_numeric=is_numeric,
+                    is_stopword=is_stopword
+                )
+                words.append(word_data)
+                line_word_objects.append(word_data)
+                
+                # Advance x (word width + space)
+                current_x += word_w + avg_char_width
             
-            # Determine if numeric
-            is_numeric = self._is_numeric(text)
-            
-            # Determine if stopword
-            is_stopword = text.lower() in self.stopwords
-            
-            # Create word data
-            word_data = WordData(
+            # Create LineData
+            line_data = LineData(
                 text=text,
                 confidence=confidence,
-                bbox=bbox,
-                line_num=line_num,
-                word_num=word_num,
-                is_numeric=is_numeric,
-                is_stopword=is_stopword
-            )
-            
-            words.append(word_data)
-            
-            # Group by line
-            if line_num not in lines_dict:
-                lines_dict[line_num] = []
-            lines_dict[line_num].append(word_data)
-        
-        # Create line data
-        lines = []
-        for line_num in sorted(lines_dict.keys()):
-            line_words = lines_dict[line_num]
-            line_text = ' '.join([w.text for w in line_words])
-            
-            # Calculate line confidence
-            line_confidence = np.mean([w.confidence for w in line_words])
-            
-            # Calculate line bounding box
-            if line_words:
-                min_x = min(w.bbox[0] for w in line_words)
-                min_y = min(w.bbox[1] for w in line_words)
-                max_x = max(w.bbox[0] + w.bbox[2] for w in line_words)
-                max_y = max(w.bbox[1] + w.bbox[3] for w in line_words)
-                line_bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
-            else:
-                line_bbox = (0, 0, 0, 0)
-            
-            line_data = LineData(
-                text=line_text,
-                confidence=line_confidence,
                 bbox=line_bbox,
-                words=line_words
+                words=line_word_objects
             )
             lines.append(line_data)
-        
-        # Calculate overall statistics
-        full_text = '\n'.join([line.text for line in lines])
+
+        # Calculate statistics
+        full_text = '\n'.join(full_text_lines)
         
         if words:
-            # Calculate weighted mean confidence
             mean_confidence = self._calculate_weighted_confidence(words)
-            
-            # Count low confidence words
             low_confidence_words = sum(1 for w in words if w.confidence < self.min_word_confidence)
-            
-            # Count numeric words
             numeric_words = sum(1 for w in words if w.is_numeric)
         else:
             mean_confidence = 0.0
             low_confidence_words = 0
             numeric_words = 0
-        
+            
         return OCRResult(
             full_text=full_text,
             mean_confidence=mean_confidence,
@@ -154,7 +159,7 @@ class TesseractEngine:
             low_confidence_words=low_confidence_words,
             numeric_words=numeric_words
         )
-    
+
     def calculate_ocr_confidence_score(self, ocr_result: OCRResult) -> float:
         """Calculate normalized OCR confidence score.
         
@@ -249,5 +254,5 @@ def extract_text_from_image(image: np.ndarray, config: Dict) -> OCRResult:
     Returns:
         OCRResult object
     """
-    engine = TesseractEngine(config)
+    engine = PaddleOCREngine(config)
     return engine.extract_text(image)

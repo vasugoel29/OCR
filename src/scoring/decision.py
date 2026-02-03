@@ -123,8 +123,10 @@ class DecisionEngine:
             # Add positive indicators
             if document_confidence.image_quality_score > 0.8:
                 reasons.append("High image quality")
-            if document_confidence.semantic_score > 0.9:
-                reasons.append("Strong semantic validation")
+            if document_confidence.schema_score > 0.9:
+                reasons.append("Strong schema completeness")
+            if document_confidence.regex_score > 0.9:
+                reasons.append("Strong regex matches")
             if document_confidence.consistency_score > 0.9:
                 reasons.append("Excellent consistency checks")
         
@@ -137,8 +139,10 @@ class DecisionEngine:
                 reasons.append("Low image quality")
             if document_confidence.ocr_confidence_score < 0.7:
                 reasons.append("Low OCR confidence")
-            if document_confidence.semantic_score < 0.7:
-                reasons.append("Weak semantic validation")
+            if document_confidence.schema_score < 0.7:
+                reasons.append("Incomplete schema")
+            if document_confidence.regex_score < 0.7:
+                reasons.append("Weak regex matches")
             if document_confidence.layout_score < 0.5:
                 reasons.append("Poor layout match")
             if document_confidence.consistency_score < 0.7:
@@ -153,8 +157,10 @@ class DecisionEngine:
                 reasons.append("Very poor image quality")
             if document_confidence.ocr_confidence_score < 0.5:
                 reasons.append("Very low OCR confidence")
-            if document_confidence.semantic_score < 0.5:
-                reasons.append("Failed semantic validation")
+            if document_confidence.schema_score < 0.5:
+                reasons.append("Failed schema validation")
+            if document_confidence.regex_score < 0.5:
+                reasons.append("Failed regex validation")
             if document_confidence.layout_score < 0.3:
                 reasons.append("Layout does not match expected template")
             if document_confidence.consistency_score < 0.5:
