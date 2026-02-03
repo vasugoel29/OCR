@@ -16,7 +16,7 @@ class FieldConfidence:
 
 @dataclass
 class DocumentConfidence:
-    """Overall document confidence scores (9-component model)."""
+    """Overall document confidence scores (10-component model with spatial validation)."""
     image_quality_score: float
     ocr_confidence_score: float
     regex_score: float
@@ -26,6 +26,7 @@ class DocumentConfidence:
     consistency_score: float
     schema_score: float
     distribution_score: float
+    spatial_compactness_score: float  # NEW: Spatial validation score
     final_score: float
     field_confidences: Dict[str, FieldConfidence] = field(default_factory=dict)
     
@@ -41,6 +42,7 @@ class DocumentConfidence:
             'consistency_score': self.consistency_score,
             'schema_score': self.schema_score,
             'distribution_score': self.distribution_score,
+            'spatial_compactness_score': self.spatial_compactness_score,
             'final_score': self.final_score,
             'field_confidences': {
                 name: {
@@ -76,7 +78,8 @@ class ConfidenceScorer:
         self.w_kv = weights.get('kv_match', 0.10)
         self.w_consistency = weights.get('consistency', 0.10)
         self.w_schema = weights.get('schema_completeness', 0.15)
-        self.w_distribution = weights.get('distribution', 0.10)
+        self.w_distribution = weights.get('distribution', 0.05)
+        self.w_spatial = weights.get('spatial_compactness', 0.05)
         
         # Field weights
         self.field_weights = config.get('field_weights', {})
@@ -91,6 +94,7 @@ class ConfidenceScorer:
                                      consistency_score: float,
                                      schema_score: float,
                                      distribution_score: float,
+                                     spatial_compactness_score: float = 1.0,
                                      field_scores: Optional[Dict[str, FieldConfidence]] = None) -> DocumentConfidence:
         """Calculate overall document confidence.
         
@@ -104,6 +108,7 @@ class ConfidenceScorer:
             consistency_score: Consistency validation score [0, 1]
             schema_score: Schema completeness score [0, 1]
             distribution_score: Token distribution score [0, 1]
+            spatial_compactness_score: Spatial compactness score [0, 1]
             field_scores: Optional field-level confidence scores
             
         Returns:
@@ -120,13 +125,14 @@ class ConfidenceScorer:
             self.w_kv * kv_score +
             self.w_consistency * consistency_score +
             self.w_schema * schema_score +
-            self.w_distribution * distribution_score
+            self.w_distribution * distribution_score +
+            self.w_spatial * spatial_compactness_score
         )
         
         # Ideally weights sum to 1.0, but normalize just in case
         total_weight = (self.w_image + self.w_ocr + self.w_regex + self.w_fuzzy + 
                        self.w_layout + self.w_kv + self.w_consistency + 
-                       self.w_schema + self.w_distribution)
+                       self.w_schema + self.w_distribution + self.w_spatial)
         
         if total_weight > 0:
             final_score = final_score / total_weight
@@ -143,6 +149,7 @@ class ConfidenceScorer:
             consistency_score=consistency_score,
             schema_score=schema_score,
             distribution_score=distribution_score,
+            spatial_compactness_score=spatial_compactness_score,
             final_score=final_score,
             field_confidences=field_scores or {}
         )

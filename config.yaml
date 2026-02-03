@@ -8,13 +8,28 @@ quality:
   max_brightness: 240  # Maximum mean pixel intensity (increased)
   min_contrast_ratio: 0.2  # Minimum contrast ratio (much lower for scanned docs)
   min_edge_density: 0.005  # Minimum edge density (lowered)
+  max_glare_ratio: 0.05  # Maximum fraction of overexposed pixels (glare)
+  glare_threshold: 253  # Pixel value threshold for glare detection
   
   # Quality score weights
   weights:
-    blur: 0.35
+    blur: 0.30
     brightness: 0.20
-    resolution: 0.25
+    resolution: 0.20
     contrast: 0.20
+    glare: 0.10
+
+# Business Logic Checks
+business_rules:
+  enabled: true
+  
+  date_validation:
+    reject_future_dates: true
+    max_age_days: 365
+    
+  amount_validation:
+    min_amount: 0.01
+    max_amount: 1000000.0
 
 # Preprocessing Configuration
 preprocessing:
@@ -33,6 +48,37 @@ preprocessing:
   bilateral_d: 9
   bilateral_sigma_color: 75
   bilateral_sigma_space: 75
+
+# Document Segmentation Configuration
+segmentation:
+  enabled: true
+  
+  # Contour-based detection
+  contour_detection:
+    enabled: true
+    min_area_ratio: 0.20  # Minimum 20% of image area
+    max_area_ratio: 0.95  # Maximum 95% of image area
+    min_aspect_ratio: 0.3  # Minimum width/height ratio
+    max_aspect_ratio: 3.0  # Maximum width/height ratio
+    approx_epsilon: 0.02  # Contour approximation accuracy
+  
+  # Text-density clustering
+  text_clustering:
+    enabled: true
+    min_cluster_size: 5  # Minimum text boxes per cluster
+    eps: 50  # DBSCAN epsilon (pixel distance)
+    min_samples: 3  # DBSCAN min samples
+  
+  # Region filtering
+  max_regions: 5  # Maximum regions to process
+  min_region_confidence: 0.3  # Minimum confidence to consider
+  
+  # Spatial validation
+  spatial_validation:
+    enabled: true
+    max_field_dispersion: 0.5  # Maximum normalized std dev of field positions
+    require_single_schema: true  # Reject if multiple schemas detected
+
 
 # OCR Engine Configuration
 ocr:
@@ -158,7 +204,9 @@ scoring:
     kv_match: 0.10
     consistency: 0.10
     schema_completeness: 0.15
-    distribution: 0.10
+    distribution: 0.05
+    spatial_compactness: 0.05  # NEW: Prevent cross-region field mixing
+
   
   # Field-level importance weights
   field_weights:
@@ -188,6 +236,9 @@ decision:
     quality_gate_failed: true
     mandatory_field_missing: true
     excessive_non_alphanumeric: 0.85
+    multiple_documents_detected: true  # NEW: Reject if multiple high-confidence regions
+    conflicting_schemas: true  # NEW: Reject if conflicting document schemas detected
+
 
 # Batch Processing
 batch:

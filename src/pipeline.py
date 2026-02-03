@@ -23,6 +23,9 @@ from .documents import InvoiceProcessor, IDDocumentProcessor, BaseDocumentProces
 from .documents.aadhaar import AadhaarExtractor
 from .scoring import ConfidenceScorer, DecisionEngine, DocumentConfidence, DecisionResult, Decision
 from .classification import DocumentClassifier
+from .segmentation import SegmentationPipeline, Region
+from .validation.spatial_validator import SpatialValidator
+from .validation.business_rules import BusinessRuleValidator
 
 
 @dataclass
@@ -39,6 +42,9 @@ class PipelineResult:
     full_text: str = "" # Added
     processing_time: float = 0.0
     error: Optional[str] = None
+    regions_detected: int = 1  # NEW: Number of regions detected
+    region_selected: Optional[Dict] = None  # NEW: Selected region info
+    multi_document_flag: bool = False  # NEW: Multiple documents detected
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization."""
@@ -53,7 +59,10 @@ class PipelineResult:
             'ocr_stats': self.ocr_stats,
             'full_text': self.full_text,
             'processing_time': self.processing_time,
-            'error': self.error
+            'error': self.error,
+            'regions_detected': self.regions_detected,
+            'region_selected': self.region_selected,
+            'multi_document_flag': self.multi_document_flag
         }
 
 
@@ -92,6 +101,11 @@ class OCRPipeline:
         self.invoice_processor = InvoiceProcessor(self.config)
         self.id_processor = IDDocumentProcessor(self.config)
         
+        # Initialize segmentation pipeline
+        self.segmentation_pipeline = SegmentationPipeline(self.config.get('segmentation', {}))
+        self.spatial_validator = SpatialValidator(self.config)
+        self.business_rule_validator = BusinessRuleValidator(self.config.get('business_rules', {}))
+        
         self.logger.info("OCR Pipeline initialized successfully")
     
     def process_document(self,
@@ -125,10 +139,59 @@ class OCRPipeline:
             if not quality_metrics.passed:
                 self.logger.warning(f"Image failed quality gate: {quality_metrics.failure_reasons}")
             
+            # Stage 1.5: Document Detection & Segmentation (NEW)
+            self.logger.debug("Stage 1.5: Document Detection & Segmentation")
+            
+            # Run lightweight OCR for text clustering (if enabled)
+            ocr_boxes_for_clustering = None
+            if self.segmentation_pipeline.use_text_clustering:
+                try:
+                    # Quick OCR pass just to get bounding boxes
+                    quick_ocr = self.ocr_engine.extract_text(image)
+                    if hasattr(quick_ocr, 'boxes') and quick_ocr.boxes:
+                        ocr_boxes_for_clustering = quick_ocr.boxes
+                except Exception as e:
+                    self.logger.warning(f"Failed to get OCR boxes for clustering: {e}")
+            
+            # Detect document regions
+            detected_regions = self.segmentation_pipeline.detect_regions(image, ocr_boxes_for_clustering)
+            num_regions = len(detected_regions)
+            
+            self.logger.info(f"Detected {num_regions} document region(s)")
+            
+            # Determine if multiple documents detected
+            multi_document_flag = num_regions > 1
+            conflicting_schemas = False
+            
             # Stage 2: Preprocessing & Correction
             self.logger.debug("Stage 2: Image Preprocessing")
-            preprocessing_result = self.preprocessing_pipeline.process(image, save_intermediates)
+            
+            # Select region to process
+            if num_regions == 1:
+                # Single region (could be full image or single detected document)
+                selected_region = detected_regions[0]
+                region_image = selected_region.image
+                self.logger.debug(f"Processing single region (method: {selected_region.detection_method})")
+            else:
+                # Multiple regions detected - select best one
+                # Sort by confidence and select highest
+                selected_region = detected_regions[0]  # Already sorted by confidence
+                region_image = selected_region.image
+                self.logger.info(f"Multiple regions detected, selected region with confidence {selected_region.confidence:.3f}")
+                
+                # Check if there are multiple high-confidence regions (ambiguous case)
+                high_conf_regions = [r for r in detected_regions if r.confidence > 0.7]
+                if len(high_conf_regions) > 1:
+                    self.logger.warning(f"Multiple high-confidence regions detected ({len(high_conf_regions)})")
+                    multi_document_flag = True
+            
+            # Store region info for result
+            region_info = selected_region.to_dict() if selected_region else None
+            
+            # Preprocess the selected region
+            preprocessing_result = self.preprocessing_pipeline.process(region_image, save_intermediates)
             processed_image = preprocessing_result['processed_image']
+
             
             # Stage 3: OCR
             self.logger.debug("Stage 3: OCR Extraction")
@@ -283,6 +346,30 @@ class OCRPipeline:
             present_count = sum(1 for f in required_fields if f in extracted_fields)
             schema_score = present_count / required_count if required_count > 0 else 1.0
             
+            # 5.9 Spatial Compactness (NEW)
+            spatial_score = 1.0  # Default
+            if hasattr(ocr_result, 'boxes') and ocr_result.boxes and hasattr(ocr_result, 'texts'):
+                try:
+                    spatial_score, spatial_details = self.spatial_validator.validate_field_compactness(
+                        extracted_fields,
+                        ocr_result.boxes,
+                        ocr_result.texts
+                    )
+                    self.logger.debug(f"Spatial validation score: {spatial_score:.3f}")
+                    
+                    # Check for conflicting schemas
+                    if spatial_details.get('num_clusters', 1) > 1:
+                        conflicting_schemas = True
+                        self.logger.warning("Multiple spatial clusters detected - possible conflicting schemas")
+                except Exception as e:
+                    self.logger.warning(f"Spatial validation failed: {e}")
+                    spatial_score = 1.0
+            
+            # 5.10 Business Rules
+            business_valid, business_reasons = self.business_rule_validator.validate(extracted_fields, document_type)
+            if not business_valid:
+                self.logger.info(f"Business rule validation failed: {business_reasons}")
+
             # Stage 6: Multi-Stage Confidence Scoring
             self.logger.debug("Stage 6: Confidence Scoring")
             document_confidence = self.confidence_scorer.calculate_document_confidence(
@@ -294,7 +381,8 @@ class OCRPipeline:
                 kv_score=kv_score,
                 consistency_score=consistency_score,
                 schema_score=schema_score,
-                distribution_score=distribution_score
+                distribution_score=distribution_score,
+                spatial_compactness_score=spatial_score
             )
             
             # Calculate non-alphanumeric ratio
@@ -307,7 +395,10 @@ class OCRPipeline:
                 quality_passed=quality_metrics.passed,
                 text_detected=text_detected,
                 mandatory_fields_present=mandatory_fields_present,
-                non_alphanumeric_ratio=non_alphanumeric_ratio
+                non_alphanumeric_ratio=non_alphanumeric_ratio,
+                multi_document_detected=multi_document_flag,
+                conflicting_schemas=conflicting_schemas,
+                business_rule_failures=business_reasons
             )
             
             processing_time = time.time() - start_time
@@ -328,7 +419,10 @@ class OCRPipeline:
                 ocr_stats=primary_ocr_result.get_stats(),
                 full_text=primary_ocr_result.full_text,
                 processing_time=processing_time,
-                error=None
+                error=None,
+                regions_detected=num_regions,
+                region_selected=region_info,
+                multi_document_flag=multi_document_flag
             )
         
         except Exception as e:
@@ -336,12 +430,11 @@ class OCRPipeline:
             self.logger.error(f"Error processing document {image_path}: {str(e)}", exc_info=True)
             
             # Return error result
-            # Return error result
             return PipelineResult(
                 document_path=str(image_path),
                 document_type=document_type,
                 decision='error',
-                confidence=DocumentConfidence(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                confidence=DocumentConfidence(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # Added spatial_compactness_score
                 decision_result=DecisionResult(
                     decision=Decision.REJECT,
                     confidence_score=0.0,
@@ -353,7 +446,10 @@ class OCRPipeline:
                 ocr_stats={'error': str(e)}, # Manual dict
                 full_text="", # Manual empty
                 processing_time=processing_time,
-                error=str(e)
+                error=str(e),
+                regions_detected=0,
+                region_selected=None,
+                multi_document_flag=False
             )
     
     def process_batch(self,

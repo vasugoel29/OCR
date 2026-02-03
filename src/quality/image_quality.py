@@ -18,6 +18,7 @@ class QualityMetrics:
     resolution_score: float
     contrast_score: float
     edge_density: float
+    glare_ratio: float
     composite_score: float
     passed: bool
     failure_reasons: list
@@ -44,13 +45,15 @@ class ImageQualityAssessor:
         self.min_contrast_ratio = config.get('min_contrast_ratio', 1.5)
         self.min_edge_density = config.get('min_edge_density', 0.01)
         self.min_resolution = config.get('min_resolution', 300)
+        self.max_glare_ratio = config.get('max_glare_ratio', 0.05)
         
         # Weights for composite score
         weights = config.get('weights', {})
-        self.weight_blur = weights.get('blur', 0.35)
+        self.weight_blur = weights.get('blur', 0.30)  # Reduced from 0.35
         self.weight_brightness = weights.get('brightness', 0.20)
-        self.weight_resolution = weights.get('resolution', 0.25)
+        self.weight_resolution = weights.get('resolution', 0.20)  # Reduced from 0.25
         self.weight_contrast = weights.get('contrast', 0.20)
+        self.weight_glare = weights.get('glare', 0.10)  # New weight
     
     def assess(self, image: np.ndarray) -> QualityMetrics:
         """Assess overall image quality.
@@ -67,19 +70,22 @@ class ImageQualityAssessor:
         resolution_score = self.calculate_resolution_score(image)
         contrast_score = self.calculate_contrast_score(image)
         edge_density = self.calculate_edge_density(image)
+        glare_ratio = self.calculate_glare_ratio(image)
         
         # Normalize scores to [0, 1]
         normalized_blur = self._normalize_blur(blur_score)
         normalized_brightness = self._normalize_brightness(brightness_score)
         normalized_resolution = self._normalize_resolution(resolution_score)
         normalized_contrast = self._normalize_contrast(contrast_score)
+        normalized_glare = self._normalize_glare(glare_ratio)
         
         # Calculate composite score
         composite_score = (
             self.weight_blur * normalized_blur +
             self.weight_brightness * normalized_brightness +
             self.weight_resolution * normalized_resolution +
-            self.weight_contrast * normalized_contrast
+            self.weight_contrast * normalized_contrast +
+            self.weight_glare * normalized_glare
         )
         
         # Check if quality gate passed
@@ -96,6 +102,9 @@ class ImageQualityAssessor:
         
         if edge_density < self.min_edge_density:
             failure_reasons.append(f"Edge density {edge_density:.4f} below threshold {self.min_edge_density}")
+            
+        if glare_ratio > self.max_glare_ratio:
+            failure_reasons.append(f"Glare ratio {glare_ratio:.1%} exceeds threshold {self.max_glare_ratio:.1%}")
         
         passed = len(failure_reasons) == 0
         
@@ -105,6 +114,7 @@ class ImageQualityAssessor:
             resolution_score=resolution_score,
             contrast_score=contrast_score,
             edge_density=edge_density,
+            glare_ratio=glare_ratio,
             composite_score=composite_score,
             passed=passed,
             failure_reasons=failure_reasons
@@ -205,7 +215,25 @@ class ImageQualityAssessor:
         edge_pixels = np.count_nonzero(edges)
         
         return float(edge_pixels / total_pixels)
-    
+
+    def calculate_glare_ratio(self, image: np.ndarray) -> float:
+        """Calculate ratio of overexposed pixels indicating glare.
+        
+        Args:
+            image: Input image
+            
+        Returns:
+            Ratio of pixels exceeding glare threshold
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+            
+        threshold = self.config.get('glare_threshold', 253)
+        overexposed = np.count_nonzero(gray >= threshold)
+        return float(overexposed / gray.size)
+
     def _normalize_blur(self, blur_score: float) -> float:
         """Normalize blur score to [0, 1]."""
         # Higher is better, cap at 1000
@@ -220,7 +248,9 @@ class ImageQualityAssessor:
         # Peak at 127.5 (middle gray)
         distance_from_optimal = abs(brightness - 127.5)
         return 1.0 - (distance_from_optimal / 127.5) * 0.5
-    
+        
+
+
     def _normalize_resolution(self, resolution: float) -> float:
         """Normalize resolution to [0, 1]."""
         # Assume minimum acceptable is 640x480 = 307,200 pixels
@@ -234,7 +264,15 @@ class ImageQualityAssessor:
             return 0.5 + 0.5 * (resolution - min_pixels) / (good_pixels - min_pixels)
         else:
             return 1.0
-    
+        
+    def _normalize_glare(self, glare_ratio: float) -> float:
+        """Normalize glare ratio to [0, 1]. High glare -> low score."""
+        max_acceptable = self.config.get('max_glare_ratio', 0.05)
+        if glare_ratio > max_acceptable:
+            # Penalize heavily if above threshold
+            return max(0.0, 1.0 - (glare_ratio / max_acceptable))
+        return 1.0 - (glare_ratio / max_acceptable * 0.5)
+
     def _normalize_contrast(self, contrast: float) -> float:
         """Normalize contrast to [0, 1]."""
         # Good contrast is typically > 0.3, excellent > 0.5
