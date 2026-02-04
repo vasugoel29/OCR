@@ -40,6 +40,38 @@ class TokenNormalizer:
         return normalized
 
     @staticmethod
+    def convert_devanagari_to_arabic(text: str) -> str:
+        """Convert Devanagari numerals to Arabic digits."""
+        if not text:
+            return ""
+        devanagari_digits = str.maketrans("०१२३४५६७८९", "0123456789")
+        return text.translate(devanagari_digits)
+
+    @staticmethod
+    def normalize_date(date_str: str) -> Optional[str]:
+        """Normalize date string to DD/MM/YYYY format."""
+        if not date_str:
+            return None
+            
+        # Clean string
+        clean_date = re.sub(r'[^\d/\-\.]', '', date_str)
+        
+        # Try different formats
+        # DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+        dmy_match = re.match(r'^(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{4})$', clean_date)
+        if dmy_match:
+            d, m, y = dmy_match.groups()
+            return f"{int(d):02d}/{int(m):02d}/{y}"
+            
+        # YYYY-MM-DD or YYYY/MM/DD
+        ymd_match = re.match(r'^(\d{4})[/\-\.](\d{1,2})[/\-\.](\d{1,2})$', clean_date)
+        if ymd_match:
+            y, m, d = ymd_match.groups()
+            return f"{int(d):02d}/{int(m):02d}/{y}"
+            
+        return None
+
+    @staticmethod
     def standardize_date(date_str: str) -> Optional[str]:
         """Convert various date formats to YYYY-MM-DD."""
         if not date_str:

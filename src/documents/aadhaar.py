@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from typing import Dict, Optional, List, Tuple
 from ..ocr.models import OCRResult
-from ..normalization import convert_devanagari_to_arabic, normalize_date
+from ..validation.normalization import TokenNormalizer
 
 
 class AadhaarExtractor:
@@ -157,7 +157,7 @@ class AadhaarExtractor:
             True if valid format
         """
         # Normalize and validate
-        number = convert_devanagari_to_arabic(number)
+        number = TokenNormalizer.convert_devanagari_to_arabic(number)
         
         # Must be exactly 12 digits
         if not number.isdigit() or len(number) != 12:
@@ -383,7 +383,7 @@ class AadhaarExtractor:
     def _extract_pin_code(self, text: str) -> Optional[str]:
         """Extract 6-digit PIN code."""
         # Normalize
-        text = convert_devanagari_to_arabic(text)
+        text = TokenNormalizer.convert_devanagari_to_arabic(text)
         
         # Look for 6 digit number, often at end of address or near keywords
         # Strict: \b\d{6}\b
@@ -396,7 +396,7 @@ class AadhaarExtractor:
 
     def _extract_enrollment_id(self, text: str) -> Optional[str]:
         """Extract Enrollment ID (EID). Format: 1234/12345/12345"""
-        text = convert_devanagari_to_arabic(text)
+        text = TokenNormalizer.convert_devanagari_to_arabic(text)
         match = re.search(r'\b(\d{4}/\d{5}/\d{5})\b', text)
         if match:
             return match.group(1)
@@ -404,7 +404,7 @@ class AadhaarExtractor:
         
     def _extract_generation_date(self, text: str) -> Optional[str]:
         """Extract Issue/Download date."""
-        text = convert_devanagari_to_arabic(text)
+        text = TokenNormalizer.convert_devanagari_to_arabic(text)
         # Look for patterns like "Issue Date: DD/MM/YYYY" or just date 
         dates = re.findall(r'\b(\d{2}/\d{2}/\d{4})\b', text)
         
@@ -413,7 +413,7 @@ class AadhaarExtractor:
              # Heuristic: Return the last found date as it often appears at bottom? 
              # Or check context. For now, valid date.
              for d in dates:
-                 norm = normalize_date(d)
+                 norm = TokenNormalizer.normalize_date(d)
                  if norm: return norm
         return None
 
@@ -437,7 +437,7 @@ class AadhaarExtractor:
         
     def _extract_dob(self, text: str) -> Optional[str]:
         """Extract Date of Birth."""
-        text = convert_devanagari_to_arabic(text)
+        text = TokenNormalizer.convert_devanagari_to_arabic(text)
         
         # Pattern: DOB : DD/MM/YYYY or YOB : YYYY
         # Also simple date search
@@ -447,7 +447,7 @@ class AadhaarExtractor:
              val = match.group(1)
              if len(val) == 4: # YOB
                  return f"01/01/{val}" # Normalize YOB to Jan 1st? Or keep as YYYY? Spec says "DD/MM/YYYY or YYYY".
-             return normalize_date(val)
+             return TokenNormalizer.normalize_date(val)
              
         # Fallback: Find any date near "DOB" or isolated
         # ...

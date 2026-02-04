@@ -3,7 +3,7 @@
 import re
 from typing import Dict, Optional, List
 from ..ocr.models import OCRResult
-from ..normalization import convert_devanagari_to_arabic, normalize_date
+from ..validation.normalization import TokenNormalizer
 
 
 class VehicleRCExtractor:
@@ -487,13 +487,13 @@ class VehicleRCExtractor:
     def _extract_fitness_date(self, text: str) -> Optional[str]:
         """Extract Fitness Valid Until."""
         match = re.search(r'(?:fitness|fit)\s*(?:valid|upto)?\s*[:.-]?\s*(\d{2}[/.-]\d{2}[/.-]\d{4})', text, re.IGNORECASE)
-        if match: return normalize_date(match.group(1))
+        if match: return TokenNormalizer.normalize_date(match.group(1))
         return None
 
     def _extract_insurance_date(self, text: str) -> Optional[str]:
         """Extract Insurance Valid Until."""
         match = re.search(r'(?:insurance|ins)\s*(?:valid|upto)?\s*[:.-]?\s*(\d{2}[/.-]\d{2}[/.-]\d{4})', text, re.IGNORECASE)
-        if match: return normalize_date(match.group(1))
+        if match: return TokenNormalizer.normalize_date(match.group(1))
         return None
 
     def _extract_mfg_date(self, text: str) -> Optional[str]:

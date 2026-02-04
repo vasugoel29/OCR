@@ -3,7 +3,7 @@
 import re
 from typing import Dict, Optional, List
 from ..ocr.models import OCRResult
-from ..normalization import convert_devanagari_to_arabic, normalize_date
+from ..validation.normalization import TokenNormalizer
 
 
 class PANExtractor:
