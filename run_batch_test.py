@@ -69,9 +69,11 @@ def main():
             
             # Get primary reason for decision
             reason = "-"
-            if hasattr(result, 'decision_details') and result.decision_details:
-                if 'reasons' in result.decision_details and result.decision_details['reasons']:
-                    reason = result.decision_details['reasons'][0]
+            if hasattr(result, 'decision_result') and result.decision_result:
+                if result.decision_result.reasons:
+                    # Join all reasons for full context, or take first?
+                    # Taking first which usually contains the most critical failure (business rule)
+                    reason = result.decision_result.reasons[0]
             
             summary = {
                 'file': filename,

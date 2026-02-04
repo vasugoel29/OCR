@@ -386,6 +386,22 @@ class OCRPipeline:
             if not business_valid:
                 self.logger.info(f"Business rule validation failed: {business_reasons}")
 
+            # Explicit check for critical fields to provide detailed rejection reasons
+            if document_type in self.FIELD_WEIGHTS:
+                weights = self.FIELD_WEIGHTS[document_type]
+                missing_critical = []
+                for field, weight in weights.items():
+                    # fields with high weight (>= 0.25) are considered critical enough to mention
+                    if weight >= 0.25 and field not in extracted_fields:
+                        missing_critical.append(field)
+                
+                if missing_critical:
+                    missing_str = ", ".join(missing_critical)
+                    business_reasons.append(f"Missing critical field(s): {missing_str}")
+                    # Also set mandatory_fields_present to False if critical fields are missing
+                    # This ensures DecisionEngine sees it as a data completeness failure
+                    mandatory_fields_present = False
+
             # Stage 6: Multi-Stage Confidence Scoring
             self.logger.debug("Stage 6: Confidence Scoring")
             document_confidence = self.confidence_scorer.calculate_document_confidence(
