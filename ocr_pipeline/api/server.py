@@ -1,50 +1,40 @@
+"""FastAPI server for OCR Pipeline."""
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 import requests
 import shutil
 import tempfile
 import os
-import sys
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
-# Ensure src is in python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(current_dir)
-
-# Import Pipeline
-from src.pipeline import OCRPipeline
+from ..core.pipeline import OCRPipeline
+from .models import OCRRequest, OCRResponse
 
 # Config
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("api_server")
+logger = logging.getLogger("ocr_pipeline.api")
 
-app = FastAPI(title="OCR Pipeline API", description="Extract data from Indian Identity Documents (Aadhaar, PAN, Vehicle RC)")
+app = FastAPI(
+    title="OCR Pipeline API",
+    description="Extract data from Indian Identity Documents (Aadhaar, PAN, Vehicle RC)",
+    version="1.0.0"
+)
 
 # Global pipeline instance
-pipeline = None
+pipeline: OCRPipeline | None = None
+
 
 @app.on_event("startup")
 async def startup_event():
+    """Initialize pipeline on server startup."""
     global pipeline
     logger.info("Initializing OCR Pipeline...")
     # Initialize pipeline once on startup
     pipeline = OCRPipeline()
     logger.info("OCR Pipeline initialized.")
 
-class OCRRequest(BaseModel):
-    image_url: str
-    document_type: Optional[str] = 'auto'
-
-class OCRResponse(BaseModel):
-    status: str
-    document_type: str
-    decision: str
-    confidence_score: float
-    reason: str
-    extracted_fields: Dict[str, Any]
-    processing_time: float
 
 async def _process_and_respond(image_url: str, doc_type: str) -> OCRResponse:
     """Helper to process an image and return response data."""
@@ -60,9 +50,12 @@ async def _process_and_respond(image_url: str, doc_type: str) -> OCRResponse:
         
         content_type = response.headers.get('content-type', '').lower()
         suffix = ".jpg" 
-        if "png" in content_type: suffix = ".png"
-        elif "jpeg" in content_type: suffix = ".jpg"
-        elif "webp" in content_type: suffix = ".webp"
+        if "png" in content_type: 
+            suffix = ".png"
+        elif "jpeg" in content_type: 
+            suffix = ".jpg"
+        elif "webp" in content_type: 
+            suffix = ".webp"
             
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
             shutil.copyfileobj(response.raw, tmp_file)
@@ -107,6 +100,7 @@ async def _process_and_respond(image_url: str, doc_type: str) -> OCRResponse:
             except Exception as e:
                 logger.warning(f"Failed to remove temp file: {e}")
 
+
 @app.post("/ocr/process_url", response_model=OCRResponse)
 async def process_url(request: OCRRequest):
     """
@@ -114,6 +108,7 @@ async def process_url(request: OCRRequest):
     document_type in body overrides default 'auto'.
     """
     return await _process_and_respond(request.image_url, request.document_type)
+
 
 @app.post("/ocr/process_url/{doc_type}", response_model=OCRResponse)
 async def process_url_with_type(doc_type: str, request: OCRRequest):
@@ -123,6 +118,11 @@ async def process_url_with_type(doc_type: str, request: OCRRequest):
     """
     return await _process_and_respond(request.image_url, doc_type)
 
+
+def main():
+    """Main entry point for running the server."""
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+
+
 if __name__ == "__main__":
-    # Run server
-    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=False)
+    main()

@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 import cv2
-from src.quality.image_quality import ImageQualityAssessor, assess_image_quality
+from ocr_pipeline.quality.image_quality import ImageQualityAssessor, assess_image_quality
 
 
 @pytest.fixture
