@@ -10,21 +10,21 @@ from dataclasses import dataclass, field
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .utils import load_config, setup_logging, load_image, clean_text
-from .quality import ImageQualityAssessor, QualityMetrics
-from .preprocessing import PreprocessingPipeline
-from .preprocessing.id_enhancer import IDDocumentEnhancer
-from .validation.normalization import TokenNormalizer
-from .validation.anchors import AnchorValidator
-from .validation.distribution import DistributionAnalyzer
-from .validation.key_value import KeyValueExtractor
-from .ocr import PaddleOCREngine, OCRResult
-from .documents import AadhaarExtractor, PANExtractor, VehicleRCExtractor, BaseDocumentProcessor
-from .scoring import ConfidenceScorer, DecisionEngine, DocumentConfidence, DecisionResult, Decision
+from ..utils import load_config, setup_logging, load_image, clean_text
+from ..quality import ImageQualityAssessor, QualityMetrics
+from ..preprocessing import PreprocessingPipeline
+from ..preprocessing.id_enhancer import IDDocumentEnhancer
+from ..validation.normalization import TokenNormalizer
+from ..validation.anchors import AnchorValidator
+from ..validation.distribution import DistributionAnalyzer
+from ..validation.key_value import KeyValueExtractor
+from ..ocr import PaddleOCREngine, OCRResult
+from ..documents import AadhaarExtractor, PANExtractor, VehicleRCExtractor, BaseDocumentProcessor
+from ..scoring import ConfidenceScorer, DecisionEngine, DocumentConfidence, DecisionResult, Decision
 from .classification import DocumentClassifier
-from .segmentation import SegmentationPipeline, Region
-from .validation.spatial_validator import SpatialValidator
-from .validation.business_rules import BusinessRuleValidator
+from ..segmentation import SegmentationPipeline, Region
+from ..validation.spatial_validator import SpatialValidator
+from ..validation.business_rules import BusinessRuleValidator
 
 
 @dataclass

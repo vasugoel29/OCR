@@ -4,6 +4,6 @@ import pytest
 import sys
 from pathlib import Path
 
-# Add src to Python path
-src_path = Path(__file__).parent / 'src'
-sys.path.insert(0, str(src_path))
+# Add ocr_pipeline to Python path
+package_path = Path(__file__).parent
+sys.path.insert(0, str(package_path))

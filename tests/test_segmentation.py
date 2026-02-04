@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 import cv2
-from src.segmentation import SegmentationPipeline, Region, BoundingBox
+from ocr_pipeline.segmentation import SegmentationPipeline, Region, BoundingBox
 
 
 def test_single_document_detection():
