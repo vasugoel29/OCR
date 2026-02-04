@@ -52,23 +52,24 @@ class DocumentClassifier:
             ],
             'vehicle_rc': [
                 r'\b[A-Z]{2}\s*[-]?\s*\d{2}\s*[-]?\s*[A-Z]{1,2}\s*[-]?\s*\d{4}\b',  # Registration number
-                r'(?:engine\s+(?:no|number)|chassis\s+(?:no|number))',
-                r'(?:registration\s+certificate|registering\s+authority)',
-                r'(?:vehicle\s+class)',
-            ]
+                r'(?:registration\s+certificate|vehicle\s+informa)',
+                r'(?:chassis|engine\s+no)',
+                r'(?:fuel|seating|unladen|wheel\s*base)',
+                r'(?:mfg\s*date|form\s+23)',
+                r'(?:model|maker|manufacturer)',
+            ],
         }
     
-    def classify(self, text: str) -> str:
-        """Classify document based on text content.
+    def classify_with_scores(self, text: str) -> Tuple[str, Dict[str, int]]:
+        """Classify document and return scores.
         
         Args:
             text: OCR extracted text
             
         Returns:
-            Computed document type ('aadhaar', 'pan', or 'vehicle_rc')
+            Tuple of (best_type, scores_dict)
         """
         text_lower = text.lower()
-        text_upper = text.upper()
         scores = {dtype: 0 for dtype in self.type_keywords}
         
         logger.debug(f"Classifying text (len={len(text)}): {text[:100]}...")
@@ -80,14 +81,12 @@ class DocumentClassifier:
                     # Longer keywords are stronger indicators
                     weight = 2 if len(keyword.split()) > 1 else 1
                     scores[dtype] += weight
-                    logger.debug(f"Keyword match for {dtype}: '{keyword}'")
         
         # Regex scoring (Strong signals)
         for dtype, patterns in self.type_patterns.items():
             for pattern in patterns:
                 if re.search(pattern, text, re.IGNORECASE):
                     scores[dtype] += 5  # High weight for pattern match
-                    logger.debug(f"Pattern match for {dtype}: {pattern}")
         
         logger.info(f"Classification scores: {scores}")
         
@@ -97,7 +96,7 @@ class DocumentClassifier:
         # If all scores are 0, default to aadhaar (most common)
         if max_score == 0:
             logger.warning("No classification signals found, defaulting to 'aadhaar'")
-            return 'aadhaar'
+            return 'aadhaar', scores
         
         # Get document type with highest score
         classified_type = max(scores, key=scores.get)
@@ -113,5 +112,10 @@ class DocumentClassifier:
                     break
         
         logger.info(f"Classified as: {classified_type} (score: {scores[classified_type]})")
-        return classified_type
+        return classified_type, scores
+
+    def classify(self, text: str) -> str:
+        """Classify document based on text content (Legacy wrapper)."""
+        dtype, _ = self.classify_with_scores(text)
+        return dtype
 

@@ -66,19 +66,28 @@ def main():
             
             # Store summary
             status = "SUCCESS" if result.decision != 'error' else "FAILED"
+            
+            # Get primary reason for decision
+            reason = "-"
+            if hasattr(result, 'decision_details') and result.decision_details:
+                if 'reasons' in result.decision_details and result.decision_details['reasons']:
+                    reason = result.decision_details['reasons'][0]
+            
             summary = {
                 'file': filename,
                 'status': status,
                 'type': result.document_type,
                 'decision': result.decision,
                 'score': f"{result.confidence.final_score:.2f}" if hasattr(result.confidence, 'final_score') else "0.00",
-                'extracted': len(result.extracted_fields)
+                'extracted': len(result.extracted_fields),
+                'reason': reason
             }
             results_summary.append(summary)
             
             # Print result for this file
             print(f"  Type: {result.document_type}")
             print(f"  Decision: {result.decision} (Score: {summary['score']})")
+            print(f"  Reason: {reason}")
             print(f"  Extracted Fields ({len(result.extracted_fields)}):")
             for k, v in result.extracted_fields.items():
                 print(f"    - {k}: {v}")
@@ -89,24 +98,26 @@ def main():
             results_summary.append({
                 'file': filename,
                 'status': "ERROR",
-                'error': str(e)
+                'error': str(e),
+                'reason': str(e)
             })
             print("-" * 60)
 
     # Print final summary
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 100)
     print("BATCH PROCESSING SUMMARY")
-    print("=" * 60)
-    print(f"{'Filename':<30} | {'Type':<12} | {'Decision':<10} | {'Score':<6} | {'Fields':<6}")
-    print("-" * 80)
+    print("=" * 100)
+    print(f"{'Filename':<25} | {'Type':<12} | {'Decision':<10} | {'Score':<6} | {'Fields':<6} | {'Reason':<30}")
+    print("-" * 100)
     
     for r in results_summary:
         if r.get('status') == 'ERROR':
-            print(f"{r['file']:<30} | {'ERROR':<12} | {'-':<10} | {'-':<6} | {'-':<6}")
+            print(f"{r['file']:<25} | {'ERROR':<12} | {'-':<10} | {'-':<6} | {'-':<6} | {r.get('error', '')[0:29]:<30}")
         else:
-            print(f"{r['file']:<30} | {r['type']:<12} | {r['decision']:<10} | {r['score']:<6} | {r['extracted']:<6}")
+            reason_trunc = r['reason'][:29] if r['reason'] else "-"
+            print(f"{r['file']:<25} | {r['type']:<12} | {r['decision']:<10} | {r['score']:<6} | {r['extracted']:<6} | {reason_trunc:<30}")
             
-    print("=" * 60)
+    print("=" * 100)
 
 if __name__ == "__main__":
     main()

@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from typing import Dict, Optional, List, Tuple
 from ..ocr.models import OCRResult
+from ..normalization import convert_devanagari_to_arabic, normalize_date
 
 
 class AadhaarExtractor:
@@ -52,15 +53,30 @@ class AadhaarExtractor:
             fields['date_of_birth'] = dob
             # fields['dob'] = dob  # Alias
         
-        # Extract gender
+        # Extract Gender
         gender = self._extract_gender(text)
         if gender:
             fields['gender'] = gender
-        
-        # Extract address
+            
+        # Extract PIN Code
+        pin = self._extract_pin_code(text)
+        if pin:
+            fields['pin_code'] = pin
+            
+        # Extract Enrollment ID
+        eid = self._extract_enrollment_id(text)
+        if eid:
+            fields['enrollment_id'] = eid
+            
+        # Extract Address (Composite)
         address = self._extract_address(text, ocr_result)
         if address:
             fields['address'] = address
+            
+        # Extract Generation Date (Issue/Download)
+        gen_date = self._extract_generation_date(text)
+        if gen_date:
+            fields['issue_date'] = gen_date
         
         return fields
     
@@ -140,6 +156,9 @@ class AadhaarExtractor:
         Returns:
             True if valid format
         """
+        # Normalize and validate
+        number = convert_devanagari_to_arabic(number)
+        
         # Must be exactly 12 digits
         if not number.isdigit() or len(number) != 12:
             return False
@@ -359,4 +378,88 @@ class AadhaarExtractor:
             if address_parts:
                 return ' '.join(address_parts[:3])  # Take first 3 lines
         
+        return None
+    
+    def _extract_pin_code(self, text: str) -> Optional[str]:
+        """Extract 6-digit PIN code."""
+        # Normalize
+        text = convert_devanagari_to_arabic(text)
+        
+        # Look for 6 digit number, often at end of address or near keywords
+        # Strict: \b\d{6}\b
+        matches = re.findall(r'\b(\d{6})\b', text)
+        for match in matches:
+            # Basic PIN validation (India PIN starts with 1-9)
+            if match[0] != '0':
+                return match
+        return None
+
+    def _extract_enrollment_id(self, text: str) -> Optional[str]:
+        """Extract Enrollment ID (EID). Format: 1234/12345/12345"""
+        text = convert_devanagari_to_arabic(text)
+        match = re.search(r'\b(\d{4}/\d{5}/\d{5})\b', text)
+        if match:
+            return match.group(1)
+        return None
+        
+    def _extract_generation_date(self, text: str) -> Optional[str]:
+        """Extract Issue/Download date."""
+        text = convert_devanagari_to_arabic(text)
+        # Look for patterns like "Issue Date: DD/MM/YYYY" or just date 
+        dates = re.findall(r'\b(\d{2}/\d{2}/\d{4})\b', text)
+        
+        # Usually checking for near "Issue" or "Download"
+        if dates:
+             # Heuristic: Return the last found date as it often appears at bottom? 
+             # Or check context. For now, valid date.
+             for d in dates:
+                 norm = normalize_date(d)
+                 if norm: return norm
+        return None
+
+    def _extract_gender(self, text: str) -> Optional[str]:
+        """Extract gender."""
+        # English
+        if re.search(r'\bMALE\b', text, re.IGNORECASE):
+            return "Male"
+        if re.search(r'\bFEMALE\b', text, re.IGNORECASE):
+            return "Female"
+        if re.search(r'\bTRANSGENDER\b', text, re.IGNORECASE):
+            return "Other"
+            
+        # Hindi (Purush/Mahila)
+        if re.search(r'पुरुष', text):
+            return "Male"
+        if re.search(r'महिला', text):
+            return "Female"
+            
+        return None
+        
+    def _extract_dob(self, text: str) -> Optional[str]:
+        """Extract Date of Birth."""
+        text = convert_devanagari_to_arabic(text)
+        
+        # Pattern: DOB : DD/MM/YYYY or YOB : YYYY
+        # Also simple date search
+        dob_pattern = r'(?:dob|date\s+of\s+birth|yob|year\s+of\s+birth)\s*[:.-]?\s*(\d{2}/\d{2}/\d{4}|\d{4})'
+        match = re.search(dob_pattern, text, re.IGNORECASE)
+        if match:
+             val = match.group(1)
+             if len(val) == 4: # YOB
+                 return f"01/01/{val}" # Normalize YOB to Jan 1st? Or keep as YYYY? Spec says "DD/MM/YYYY or YYYY".
+             return normalize_date(val)
+             
+        # Fallback: Find any date near "DOB" or isolated
+        # ...
+        return None
+        
+    def _extract_address(self, text: str, ocr_result: OCRResult) -> Optional[str]:
+        """Extract address (simplified)."""
+        # ... existing logic or improved ...
+        # For now, simplistic capture of text block ?
+        # Address usually is a large block.
+        # Check for "Address:" keyword
+        match = re.search(r'(?:address|pata)\s*[:.-]\s*(.+?)(?:\d{6}|$)', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return re.sub(r'\s+', ' ', match.group(1)).strip()
         return None

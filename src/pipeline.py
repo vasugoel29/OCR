@@ -69,6 +69,14 @@ class PipelineResult:
 class OCRPipeline:
     """Main OCR pipeline for document processing."""
     
+    
+    # Critical field weights for schema scoring
+    FIELD_WEIGHTS = {
+        'aadhaar': {'aadhaar_number': 0.4, 'name': 0.3, 'date_of_birth': 0.3},
+        'pan': {'pan_number': 0.5, 'name': 0.25, 'date_of_birth': 0.25},
+        'vehicle_rc': {'registration_number': 0.4, 'owner_name': 0.2, 'engine_number': 0.2, 'chassis_number': 0.2}
+    }
+
     def __init__(self, config_path: Union[str, Path] = "config.yaml"):
         """Initialize OCR pipeline.
         
@@ -205,8 +213,14 @@ class OCRPipeline:
                 
                 # If standard pass failed to find text, it might be a challenging ID document
                 # Try running the ID enhancement pass blindly to see if we find anything
-                if ocr_result.total_words == 0:
-                    self.logger.info("No text in standard pass. Trying ID enhancement for classification...")
+                # Initial classification attempt
+                document_type_candidate, scores = self.classifier.classify_with_scores(ocr_result.full_text)
+                max_score = max(scores.values()) if scores else 0
+                self.logger.info(f"Initial classification scores: {scores}")
+
+                # If standard pass failed to find text OR no clear classification signal
+                if ocr_result.total_words == 0 or max_score == 0:
+                    self.logger.info("Weak or no classification signal. Trying ID enhancement...")
                     
                     if hasattr(self.preprocessing_pipeline, 'corrector'):
                         deskewed_image = self.preprocessing_pipeline.corrector.correct_skew(image)
@@ -219,14 +233,15 @@ class OCRPipeline:
                     
                     if ocr_result_enh.total_words > 0:
                         ocr_result = ocr_result_enh  # Use this for classification
-                        self.logger.info(f"Enhancement found {ocr_result.total_words} words. Proceeding with classification.")
-                
-                if ocr_result.total_words == 0:
-                    self.logger.warning("No text detected even after enhancement, defaulting to 'aadhaar'")
-                    document_type = 'aadhaar'
-                else:
-                    document_type = self.classifier.classify(ocr_result.full_text)
-                    self.logger.info(f"Detected document type: {document_type}")
+                        self.logger.info(f"Enhancement found {ocr_result.total_words} words. Re-classifying.")
+                        
+                        # Re-classify
+                        document_type_candidate, scores = self.classifier.classify_with_scores(ocr_result.full_text)
+                        max_score = max(scores.values()) if scores else 0
+                        self.logger.info(f"Re-classification scores: {scores}")
+
+                document_type = document_type_candidate
+                self.logger.info(f"Detected document type: {document_type} (score: {max_score})")
             
             primary_ocr_result = ocr_result
             
@@ -321,9 +336,10 @@ class OCRPipeline:
             self.logger.debug("Stage 5: Post-OCR Validation")
             
             # 5.1 Token Normalization (in-place or separate? keeping raw text for now, using norm helper)
-            # 5.2 Regex Score (implicit in semantic) -> we'll explicitly calculate one
-            # Just approximation based on extracted vs required
-            regex_score = len(extracted_fields) / max(len(required_fields), 1) if required_fields else 1.0
+            # 5.2 Regex Score (Redundant with Schema Score in weighted model, setting to 1.0 or same as schema)
+            # We'll set it to be consistent with Schema Score later
+            regex_score = 1.0 
+            
             
             # 5.3 Fuzzy Anchors (use 'aadhaar' for all ID types as fallback)
             anchor_doc_type = document_type if document_type in ['aadhaar', 'pan', 'vehicle_rc'] else 'aadhaar'
@@ -341,10 +357,9 @@ class OCRPipeline:
             dist_doc_type = document_type if document_type in ['aadhaar', 'pan', 'vehicle_rc'] else 'aadhaar'
             distribution_score, dist_metrics = self.distribution_analyzer.analyze(ocr_result.full_text, dist_doc_type)
             
-            # 5.8 Schema Completeness
-            required_count = len(required_fields)
-            present_count = sum(1 for f in required_fields if f in extracted_fields)
-            schema_score = present_count / required_count if required_count > 0 else 1.0
+            # 5.8 Schema Completeness (Weighted)
+            schema_score = self._calculate_weighted_schema_score(extracted_fields, document_type)
+            regex_score = schema_score # align regex score with schema score for consistency
             
             # 5.9 Spatial Compactness (NEW)
             spatial_score = 1.0  # Default
@@ -530,6 +545,33 @@ class OCRPipeline:
             self.logger.warning(f"Unknown document type: {document_type}, defaulting to aadhaar extractor")
             return self.aadhaar_extractor
     
+    def _calculate_weighted_schema_score(self, extracted_fields: Dict[str, any], document_type: str) -> float:
+        """Calculate schema score based on field weights."""
+        if document_type not in self.FIELD_WEIGHTS:
+            # Fallback to unweighted count
+            required = self._get_required_fields(document_type)
+            if not required: return 1.0
+            found = sum(1 for f in required if f in extracted_fields)
+            return found / len(required)
+            
+        weights = self.FIELD_WEIGHTS[document_type]
+        score = 0.0
+        total_weight = 0.0
+        
+        for field, weight in weights.items():
+            total_weight += weight
+            if field in extracted_fields:
+                score += weight
+                
+        # Handle optional/extra fields contribution? 
+        # For strict schema, we focus on critical fields.
+        # Use simple count for remaining weight if total_weight < 1.0?
+        # Assuming weights sum to ~1.0. If not, normalize.
+        
+        if total_weight > 0:
+            return score / total_weight
+        return 0.0
+
     def _get_required_fields(self, document_type: str) -> List[str]:
         """Get required fields for document type.
         

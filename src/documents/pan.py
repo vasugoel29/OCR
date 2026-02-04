@@ -3,6 +3,7 @@
 import re
 from typing import Dict, Optional, List
 from ..ocr.models import OCRResult
+from ..normalization import convert_devanagari_to_arabic, normalize_date
 
 
 class PANExtractor:
@@ -49,6 +50,10 @@ class PANExtractor:
         dob = self._extract_dob(text)
         if dob:
             fields['date_of_birth'] = dob
+            
+        # Check visuals (Proxy via text keywords)
+        if self._check_signature(text):
+            fields['signature_present'] = True
         
         return fields
     
@@ -63,9 +68,17 @@ class PANExtractor:
         # Strategy 1: Standard PAN pattern
         pattern1 = r'\b([A-Z]{5}[0-9]{4}[A-Z]{1})\b'
         matches = re.findall(pattern1, text_upper)
+        unique_pans = set()
         for match in matches:
             if self._validate_pan(match):
-                return match
+                unique_pans.add(match)
+        
+        # Hard Reject: Multiple distinctive PANs
+        if len(unique_pans) > 1:
+            return None # Trigger rejection due to ambiguity
+            
+        if len(unique_pans) == 1:
+            return list(unique_pans)[0]
         
         # Strategy 2: Fuzzy Extraction with Substitution
         # Look for any 10-character alphanumeric sequence that LOOKS like a PAN
@@ -325,3 +338,7 @@ class PANExtractor:
             return True
         except ValueError:
             return False
+
+    def _check_signature(self, text: str) -> bool:
+        """Check for signature keywords."""
+        return bool(re.search(r'(?:signature|sign|hastakshar|हस्ताक्षर)', text, re.IGNORECASE))

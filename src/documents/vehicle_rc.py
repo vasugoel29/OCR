@@ -3,6 +3,7 @@
 import re
 from typing import Dict, Optional, List
 from ..ocr.models import OCRResult
+from ..normalization import convert_devanagari_to_arabic, normalize_date
 
 
 class VehicleRCExtractor:
@@ -41,7 +42,10 @@ class VehicleRCExtractor:
         reg_number = self._extract_registration_number(text, ocr_result)
         if reg_number:
             fields['registration_number'] = reg_number
-            fields['id_number'] = reg_number  # Alias for compatibility
+            # fields['id_number'] = reg_number  # Alias for compatibility
+        else:
+            # Hard Reject signal (will be handled by scorer if field is None)
+            pass
         
         # Extract owner name
         owner_name = self._extract_owner_name(text, ocr_result)
@@ -73,74 +77,90 @@ class VehicleRCExtractor:
         vehicle_class = self._extract_vehicle_class(text)
         if vehicle_class:
             fields['vehicle_class'] = vehicle_class
-        
+            
+        # Extract fuel type
+        fuel = self._extract_fuel_type(text)
+        if fuel:
+            fields['fuel_type'] = fuel
+            
+        # Extract seating capacity
+        seating = self._extract_seating_capacity(text)
+        if seating:
+            fields['seating_capacity'] = seating
+            
+        # Extract wheelbase
+        wheelbase = self._extract_generic_params(text, ['wheel', 'base', 'wb'], r'(\d{4})')
+        if wheelbase:
+            fields['wheelbase'] = wheelbase
+            
+        # Extract unladen weight
+        weight = self._extract_generic_params(text, ['unladen', 'ulw', 'wt'], r'(\d{3,5})')
+        if weight:
+            fields['unladen_weight'] = weight
+            
+        # Extract color
+        color = self._extract_generic_params(text, ['colour', 'color'], r'([A-Z]{3,10})')
+        if color:
+            fields['vehicle_color'] = color
+            
+        # Extract hypothecation
+        hypothecation = self._extract_hypothecation(text)
+        if hypothecation:
+            fields['hypothecation'] = hypothecation
+            
+        # Extract validity dates
+        fitness = self._extract_fitness_date(text)
+        if fitness:
+             fields['fitness_validity_date'] = fitness
+             
+        insurance = self._extract_insurance_date(text)
+        if insurance:
+             fields['insurance_validity_date'] = insurance
+             
+        mfg = self._extract_mfg_date(text)
+        if mfg:
+             fields['manufacturing_date'] = mfg
+            
         return fields
     
     def _extract_registration_number(self, text: str, ocr_result: OCRResult) -> Optional[str]:
         """Extract vehicle registration number.
         
-        Format: XX00XX0000 or XX-00-XX-0000
-        - 2 letters (state code)
-        - 2 digits (RTO code)
-        - 1-2 letters (series)
-        - 4 digits (unique number)
-        
-        Examples: DL01AB1234, MH02CD5678, KA03EF9012
-        
-        Args:
-            text: Full OCR text
-            ocr_result: OCR result with word-level data
-            
-        Returns:
-            Registration number or None
+        Strict mode: Returns None if multiple conflicting registration numbers are found.
         """
+        # Collect all candidates
+        candidates = set()
+        
         # Strategy 1: Standard format with hyphens or spaces
         pattern1 = r'\b([A-Z]{2})\s*[-]?\s*(\d{2})\s*[-]?\s*([A-Z]{1,2})\s*[-]?\s*(\d{4})\b'
         matches = re.findall(pattern1, text.upper())
+        
         for match in matches:
             reg_num = ''.join(match)
             if self._validate_registration_number(reg_num):
-                # Return in standard format with hyphens
-                return f"{match[0]}-{match[1]}-{match[2]}-{match[3]}"
+                 candidates.add(f"{match[0]}-{match[1]}-{match[2]}-{match[3]}")
         
         # Strategy 2: Continuous format (no separators)
         pattern2 = r'\b([A-Z]{2}\d{2}[A-Z]{1,2}\d{4})\b'
         matches = re.findall(pattern2, text.upper())
         for match in matches:
             if self._validate_registration_number(match):
-                # Format with hyphens for readability
+                # Standardize format
                 state = match[:2]
                 rto = match[2:4]
-                # Find where letters end and digits begin after RTO
                 series_end = 4
                 while series_end < len(match) and match[series_end].isalpha():
                     series_end += 1
                 series = match[4:series_end]
                 number = match[series_end:]
-                return f"{state}-{rto}-{series}-{number}"
+                candidates.add(f"{state}-{rto}-{series}-{number}")
         
-        # Strategy 3: Look near "Registration Number" keyword
-        reg_pattern = r'(?:registration\s+(?:no|number)|reg\s*no)\s*:?\s*([A-Z]{2}\s*[-]?\s*\d{2}\s*[-]?\s*[A-Z]{1,2}\s*[-]?\s*\d{4})'
-        match = re.search(reg_pattern, text.upper(), re.IGNORECASE | re.DOTALL)
-        if match:
-            reg_num = re.sub(r'[\s-]+', '', match.group(1))
-            if self._validate_registration_number(reg_num):
-                # Format properly
-                state = reg_num[:2]
-                rto = reg_num[2:4]
-                series_end = 4
-                while series_end < len(reg_num) and reg_num[series_end].isalpha():
-                    series_end += 1
-                series = reg_num[4:series_end]
-                number = reg_num[series_end:]
-                return f"{state}-{rto}-{series}-{number}"
-        
-        # Strategy 4: Extract from word-level data
-        if ocr_result.words:
-            reg_num = self._extract_from_words(ocr_result.words)
-            if reg_num:
-                return reg_num
-        
+        # Strict enforcement
+        if len(candidates) > 1:
+            return None # Reject due to ambiguity
+        if len(candidates) == 1:
+            return list(candidates)[0]
+            
         return None
     
     def _extract_from_words(self, words: List) -> Optional[str]:
@@ -391,6 +411,40 @@ class VehicleRCExtractor:
         except ValueError:
             return False
     
+    def _extract_fuel_type(self, text: str) -> Optional[str]:
+        """Extract fuel type."""
+        fuel_types = ['PETROL', 'DIESEL', 'CNG', 'LPG', 'ELECTRIC', 'HYBRID', 'PETRO']
+        
+        # Strategy 1: Look for pattern
+        match = re.search(r'(?:fuel|propulsion)\s*:?\s*([A-Za-z]+)', text, re.IGNORECASE)
+        if match:
+            val = match.group(1).upper()
+            if any(f in val for f in fuel_types):
+                return val
+        
+        # Strategy 2: Scan for fuel keywords directly
+        for f in fuel_types:
+            if re.search(r'\b' + f + r'\b', text.upper()):
+                return f
+        return None
+
+    def _extract_seating_capacity(self, text: str) -> Optional[str]:
+        """Extract seating capacity."""
+        match = re.search(r'(?:seating|cap|seat)\s*(?:cap)?\s*[:.]?\s*(\d{1,2})', text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return None
+        
+    def _extract_generic_params(self, text: str, keywords: List[str], value_pattern: str) -> Optional[str]:
+        """Generic extraction for key-value pairs."""
+        # Join keywords with |
+        kw_regex = '|'.join(keywords)
+        pattern = r'(?:' + kw_regex + r')\s*[:.-]?\s*' + value_pattern
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+             return match.group(1)
+        return None
+
     def _extract_vehicle_class(self, text: str) -> Optional[str]:
         """Extract vehicle class (e.g., MCWG, LMV, HMV).
         
@@ -419,4 +473,31 @@ class VehicleRCExtractor:
             if re.search(r'\b' + vc + r'\b', text.upper()):
                 return vc
         
+        return None
+        
+    def _extract_hypothecation(self, text: str) -> Optional[str]:
+        """Extract financing bank (Hypothecation)."""
+        # Search for "HPA" or "Hypothecated"
+        match = re.search(r'(?:hypothecation|hypothecated|financed|hpa|hp)\s*(?:by|to|with)?\s*[:.-]?\s*([A-Z0-9\s.,&]+)', text, re.IGNORECASE)
+        if match:
+             val = match.group(1).strip()
+             if len(val) > 3: return val
+        return None
+        
+    def _extract_fitness_date(self, text: str) -> Optional[str]:
+        """Extract Fitness Valid Until."""
+        match = re.search(r'(?:fitness|fit)\s*(?:valid|upto)?\s*[:.-]?\s*(\d{2}[/.-]\d{2}[/.-]\d{4})', text, re.IGNORECASE)
+        if match: return normalize_date(match.group(1))
+        return None
+
+    def _extract_insurance_date(self, text: str) -> Optional[str]:
+        """Extract Insurance Valid Until."""
+        match = re.search(r'(?:insurance|ins)\s*(?:valid|upto)?\s*[:.-]?\s*(\d{2}[/.-]\d{2}[/.-]\d{4})', text, re.IGNORECASE)
+        if match: return normalize_date(match.group(1))
+        return None
+
+    def _extract_mfg_date(self, text: str) -> Optional[str]:
+        """Extract Mfg Date (Month/Year)."""
+        match = re.search(r'(?:mfg|manufacturing)\s*(?:date)?\s*[:.-]?\s*(\d{2}[/.-]\d{4}|\d{4})', text, re.IGNORECASE)
+        if match: return match.group(1) # Often just MM/YYYY, leave as is? normalize?
         return None
