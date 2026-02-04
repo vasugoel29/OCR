@@ -1,4 +1,4 @@
-# Indian ID OCR Pipeline
+# OCR Pipeline
 
 A high-performance, self-hosted OCR system designed to extract structured data from Indian Identity Documents (Aadhaar, PAN, Vehicle RC). It utilizes a multi-layered approach involving image preprocessing, document detection, dual-pass OCR, and a 10-component validation system.
 
