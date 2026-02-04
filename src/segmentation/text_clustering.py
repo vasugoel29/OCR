@@ -3,7 +3,14 @@
 import logging
 from typing import List, Tuple
 import numpy as np
-from sklearn.cluster import DBSCAN
+
+# Try to import sklearn, but handle failure gracefully
+try:
+    from sklearn.cluster import DBSCAN
+    HAS_SKLEARN = True
+except ImportError:
+    DBSCAN = None
+    HAS_SKLEARN = False
 
 from .region import Region, BoundingBox
 
@@ -19,6 +26,9 @@ class TextClusterer:
         """
         self.config = config or {}
         self.logger = logging.getLogger(__name__)
+        
+        if not HAS_SKLEARN:
+            self.logger.warning("scikit-learn not found. Text clustering will be disabled.")
         
         # Get configuration parameters
         text_config = self.config.get('text_clustering', {})
@@ -37,6 +47,10 @@ class TextClusterer:
         Returns:
             List of detected regions based on text clustering
         """
+        if not HAS_SKLEARN:
+            self.logger.debug("Skipping clustering (sklearn not installed)")
+            return []
+            
         if not ocr_boxes or len(ocr_boxes) < self.min_cluster_size:
             self.logger.debug("Not enough text boxes for clustering")
             return []

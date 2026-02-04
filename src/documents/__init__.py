@@ -1,7 +1,9 @@
 """Documents module."""
 
 from .base import BaseDocumentProcessor
-from .invoice import InvoiceProcessor
-from .id_document import IDDocumentProcessor
+from .aadhaar import AadhaarExtractor
+from .pan import PANExtractor
+from .vehicle_rc import VehicleRCExtractor
 
-__all__ = ['BaseDocumentProcessor', 'InvoiceProcessor', 'IDDocumentProcessor']
+__all__ = ['BaseDocumentProcessor', 'AadhaarExtractor', 'PANExtractor', 'VehicleRCExtractor']
+

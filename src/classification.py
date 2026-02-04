@@ -1,4 +1,4 @@
-"""Document classification logic."""
+"""Document classification logic for Indian documents."""
 
 from typing import Dict, List, Tuple
 import re
@@ -7,37 +7,57 @@ import logging
 logger = logging.getLogger('ocr_pipeline')
 
 class DocumentClassifier:
-    """Classifies documents based on content."""
+    """Classifies Indian documents (Aadhaar, PAN, Vehicle RC) based on content."""
     
     def __init__(self):
         """Initialize classifier with keyword maps and patterns."""
         self.type_keywords = {
-            'id_document': [
-                'government of india', 'male', 'female', 'dob', 'date of birth',
-                'aadhaar', 'permanent account number', 'income tax department',
-                'unique identification authority', 'gender', 'father', 'husband',
-                'yob', 'year of birth', 'enrollment', 'resident', 'identity', 'card'
+            'aadhaar': [
+                'aadhaar', 'आधार', 'uidai', 'government of india',
+                'भारत सरकार', 'unique identification', 'unique identification authority',
+                'enrollment', 'resident', 'dob', 'date of birth', 'male', 'female',
+                'gender', 'address', 'पता'
             ],
-            'invoice': [
-                'invoice', 'total', 'tax', 'gst', 'grand total', 'subtotal',
-                'bill to', 'ship to', 'order date', 'payment', 'amount', 'qty',
-                'description', 'hsn', 'sac', 'price', 'rate', 'due date'
+            'pan': [
+                'income tax', 'permanent account number', 'pan',
+                'income tax department', 'govt. of india', 'government of india',
+                'आयकर विभाग', 'स्थायी खाता संख्या', 'father', 'signature',
+                'fathers name', 'father\'s name'
+            ],
+            'vehicle_rc': [
+                'registration certificate', 'vehicle', 'registration number',
+                'engine no', 'chassis no', 'registering authority', 'owner',
+                'रजिस्ट्रेशन', 'वाहन', 'इंजन', 'चेसिस', 'maker', 'model',
+                'vehicle class', 'reg no', 'rc', 'rto'
             ]
         }
         
         # Regex patterns for strong signals
         self.type_patterns = {
-            'id_document': [
-                r'\d{4}\s\d{4}\s\d{4}',  # Aadhaar (12 digits space sep)
-                r'[A-Z]{5}[0-9]{4}[A-Z]{1}',  # PAN
-                r'DOB\s*:\s*\d{2}/\d{2}/\d{4}'  # DOB label
+            'aadhaar': [
+                r'\b\d{4}\s+\d{4}\s+\d{4}\b',  # Aadhaar number (12 digits with spaces)
+                r'\b\d{12}\b',  # Aadhaar number (12 digits continuous)
+                r'(?:aadhaar|आधार)',  # Aadhaar keyword
+                r'UIDAI',  # UIDAI keyword
             ],
-            'invoice': [
-                r'Invoice\s*(No|#)',
-                r'Total\s*(Amount)?'
+            'pan': [
+                r'\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b',  # PAN format
+                # Fuzzy matches for "Income Tax Department"
+                r'[I1|]NCOME\s*TAX\s*DEP[A-Z]*',
+                r'NCOME\s*T[A-X]+',  # Handle missing leading I
+                # Fuzzy matches for "Permanent Account Number"
+                r'P[AE]RM[A-Z]*\s*ACC[A-Z]*\s*NUM[A-Z]*',
+                r'(?:father\'?s?\s+name)',  # Father's name
+                r'GOVT\.?\s*O[Ff]\s*IND[A-Z]*', # Govt of India
+            ],
+            'vehicle_rc': [
+                r'\b[A-Z]{2}\s*[-]?\s*\d{2}\s*[-]?\s*[A-Z]{1,2}\s*[-]?\s*\d{4}\b',  # Registration number
+                r'(?:engine\s+(?:no|number)|chassis\s+(?:no|number))',
+                r'(?:registration\s+certificate|registering\s+authority)',
+                r'(?:vehicle\s+class)',
             ]
         }
-        
+    
     def classify(self, text: str) -> str:
         """Classify document based on text content.
         
@@ -45,9 +65,10 @@ class DocumentClassifier:
             text: OCR extracted text
             
         Returns:
-            Computed document type ('invoice' or 'id_document')
+            Computed document type ('aadhaar', 'pan', or 'vehicle_rc')
         """
-        text = text.lower()
+        text_lower = text.lower()
+        text_upper = text.upper()
         scores = {dtype: 0 for dtype in self.type_keywords}
         
         logger.debug(f"Classifying text (len={len(text)}): {text[:100]}...")
@@ -55,36 +76,42 @@ class DocumentClassifier:
         # Keyword scoring
         for dtype, keywords in self.type_keywords.items():
             for keyword in keywords:
-                if keyword in text:
+                if keyword.lower() in text_lower:
                     # Longer keywords are stronger indicators
                     weight = 2 if len(keyword.split()) > 1 else 1
                     scores[dtype] += weight
-                    
+                    logger.debug(f"Keyword match for {dtype}: '{keyword}'")
+        
         # Regex scoring (Strong signals)
         for dtype, patterns in self.type_patterns.items():
             for pattern in patterns:
                 if re.search(pattern, text, re.IGNORECASE):
                     scores[dtype] += 5  # High weight for pattern match
-                    logger.debug(f"Matched pattern for {dtype}: {pattern}")
+                    logger.debug(f"Pattern match for {dtype}: {pattern}")
         
         logger.info(f"Classification scores: {scores}")
         
-        # Default logic
-        # If ID score > 0, prefer ID (since they often have less text than invoices)
-        if scores['id_document'] > 0 and scores['id_document'] >= scores['invoice']:
-            return 'id_document'
-            
-        if scores['invoice'] > scores['id_document']:
-            return 'invoice'
-            
-        # Tie-breaker or both zero
-        # If short text (< 50 words) and mostly numbers, might be an ID card back or crop
-        # But risky. Defaulting to invoice is safer for business apps, 
-        # but let's check if we have ANY signal.
+        # Decision logic - highest score wins
+        max_score = max(scores.values())
         
-        if scores['id_document'] == 0 and scores['invoice'] == 0:
-             # Check numeric density?
-             # For now, default invoice
-             return 'invoice'
-             
-        return 'invoice'
+        # If all scores are 0, default to aadhaar (most common)
+        if max_score == 0:
+            logger.warning("No classification signals found, defaulting to 'aadhaar'")
+            return 'aadhaar'
+        
+        # Get document type with highest score
+        classified_type = max(scores, key=scores.get)
+        
+        # Tie-breaker: if multiple types have same score, use priority order
+        # Priority: vehicle_rc > pan > aadhaar (more specific to less specific)
+        if list(scores.values()).count(max_score) > 1:
+            logger.info(f"Tie detected, using priority order")
+            priority_order = ['vehicle_rc', 'pan', 'aadhaar']
+            for dtype in priority_order:
+                if scores[dtype] == max_score:
+                    classified_type = dtype
+                    break
+        
+        logger.info(f"Classified as: {classified_type} (score: {scores[classified_type]})")
+        return classified_type
+

@@ -34,7 +34,7 @@ class AadhaarExtractor:
         aadhaar_number = self._extract_aadhaar_number(text, ocr_result)
         if aadhaar_number:
             fields['aadhaar_number'] = aadhaar_number
-            fields['id_number'] = aadhaar_number  # Alias
+            # fields['id_number'] = aadhaar_number  # Alias
         
         # Extract VID if present
         vid = self._extract_vid(text)
@@ -50,7 +50,7 @@ class AadhaarExtractor:
         dob = self._extract_dob(text)
         if dob:
             fields['date_of_birth'] = dob
-            fields['dob'] = dob  # Alias
+            # fields['dob'] = dob  # Alias
         
         # Extract gender
         gender = self._extract_gender(text)

@@ -19,8 +19,7 @@ from .validation.anchors import AnchorValidator
 from .validation.distribution import DistributionAnalyzer
 from .validation.key_value import KeyValueExtractor
 from .ocr import PaddleOCREngine, OCRResult
-from .documents import InvoiceProcessor, IDDocumentProcessor, BaseDocumentProcessor
-from .documents.aadhaar import AadhaarExtractor
+from .documents import AadhaarExtractor, PANExtractor, VehicleRCExtractor, BaseDocumentProcessor
 from .scoring import ConfidenceScorer, DecisionEngine, DocumentConfidence, DecisionResult, Decision
 from .classification import DocumentClassifier
 from .segmentation import SegmentationPipeline, Region
@@ -97,9 +96,10 @@ class OCRPipeline:
         self.kv_extractor = KeyValueExtractor(self.config)
         self.token_normalizer = TokenNormalizer()
         
-        # Initialize document processors
-        self.invoice_processor = InvoiceProcessor(self.config)
-        self.id_processor = IDDocumentProcessor(self.config)
+        # Initialize document extractors
+        self.aadhaar_extractor = AadhaarExtractor()
+        self.pan_extractor = PANExtractor()
+        self.vehicle_rc_extractor = VehicleRCExtractor()
         
         # Initialize segmentation pipeline
         self.segmentation_pipeline = SegmentationPipeline(self.config.get('segmentation', {}))
@@ -110,13 +110,13 @@ class OCRPipeline:
     
     def process_document(self,
                         image_path: Union[str, Path],
-                        document_type: str = 'invoice',
+                        document_type: str = 'auto',
                         save_intermediates: bool = False) -> PipelineResult:
         """Process a single document through the complete pipeline.
         
         Args:
             image_path: Path to document image
-            document_type: Type of document ('invoice' or 'id_document')
+            document_type: Type of document ('aadhaar', 'pan', 'vehicle_rc', or 'auto')
             save_intermediates: Whether to save intermediate processing results
             
         Returns:
@@ -222,8 +222,8 @@ class OCRPipeline:
                         self.logger.info(f"Enhancement found {ocr_result.total_words} words. Proceeding with classification.")
                 
                 if ocr_result.total_words == 0:
-                    self.logger.warning("No text detected even after enhancement, defaulting to 'invoice'")
-                    document_type = 'invoice'
+                    self.logger.warning("No text detected even after enhancement, defaulting to 'aadhaar'")
+                    document_type = 'aadhaar'
                 else:
                     document_type = self.classifier.classify(ocr_result.full_text)
                     self.logger.info(f"Detected document type: {document_type}")
@@ -231,9 +231,9 @@ class OCRPipeline:
             primary_ocr_result = ocr_result
             
             # ID-Specific Enhanced OCR Pass (Dual Pass)
-            # If identified as ID document, run the deskew+enhance pass for better accuracy on specific fields
-            if document_type == 'id_document':
-                self.logger.info("Running enhance pass for ID document")
+            # For all Indian ID documents, run enhanced pass for better accuracy
+            if document_type in ['aadhaar', 'pan', 'vehicle_rc']:
+                self.logger.info(f"Running enhanced pass for {document_type} document")
                 
                 # Pass 1 was already done above (OCRResult) on standard processed image
                 # Pass 2: Enhanced image
@@ -251,9 +251,9 @@ class OCRPipeline:
                 if ocr_result_enh.total_words > ocr_result.total_words:
                     primary_ocr_result = ocr_result_enh
                 
-                # Note: We keep both results available for the AdhaarExtractor later logic
+                # Note: We keep both results available for extractor logic
             else:
-                 # Invoice or others - single pass is usually sufficient
+                 # Unknown type - single pass
                  ocr_result_enh = None
                  primary_ocr_result = ocr_result
             
@@ -270,55 +270,52 @@ class OCRPipeline:
             # Stage 4: Document-Specific Processing
             self.logger.debug("Stage 4: Document-Specific Processing")
             
-            if document_type == 'id_document':
-                # Specialized Aadhaar/ID extraction
-                aadhaar_extractor = AadhaarExtractor()
+            # Get appropriate extractor
+            extractor = self._get_extractor(document_type)
+            
+            # Extract from standard pass first
+            extracted_fields = extractor.extract_fields(ocr_result)
+            
+            # For all document types, try enhanced pass if available and fields are missing
+            if ocr_result_enh:
+                fields_enh = extractor.extract_fields(ocr_result_enh)
                 
-                # Extract from standard pass first
-                extracted_fields = aadhaar_extractor.extract_fields(ocr_result)
-                
-                # If Aadhaar number missing, try enhanced pass if available
-                if 'aadhaar_number' not in extracted_fields and ocr_result_enh:
-                    fields_enh = aadhaar_extractor.extract_fields(ocr_result_enh)
-                    if 'aadhaar_number' in fields_enh:
+                # Merge fields from enhanced pass if missing in standard
+                # Priority fields that benefit from enhancement
+                if document_type == 'aadhaar':
+                    priority_fields = ['aadhaar_number', 'name', 'date_of_birth', 'gender', 'address']
+                    # Special handling for aadhaar_number alias
+                    if 'aadhaar_number' in fields_enh and 'aadhaar_number' not in extracted_fields:
                         extracted_fields['aadhaar_number'] = fields_enh['aadhaar_number']
-                        # Ensure 'id_number' alias is set for compatibility
                         extracted_fields['id_number'] = fields_enh['aadhaar_number']
+                elif document_type == 'pan':
+                    priority_fields = ['pan_number', 'name', 'father_name', 'date_of_birth']
+                elif document_type == 'vehicle_rc':
+                    priority_fields = ['registration_number', 'owner_name', 'engine_number', 'chassis_number']
+                else:
+                    priority_fields = []
                 
-                # Merge other fields from enhanced pass if missing in standard
-                # (Name, DOB, Gender often better in enhanced)
-                if ocr_result_enh:
-                    fields_enh = aadhaar_extractor.extract_fields(ocr_result_enh)
-                    for key in ['name', 'date_of_birth', 'gender', 'address']:
-                        if key not in extracted_fields and key in fields_enh:
-                            extracted_fields[key] = fields_enh[key]
-                
-                # Use ID processor for subsequent validation steps
-                processor = self.id_processor
-                
-                # Update main ocr_result to be the primary one for reporting
-                ocr_result = primary_ocr_result
-            else:
-                processor = self._get_processor(document_type)
-                
-                # Extract fields
-                extracted_fields = processor.extract_fields(ocr_result)
+                # Merge priority fields
+                for key in priority_fields:
+                    if key not in extracted_fields and key in fields_enh:
+                        extracted_fields[key] = fields_enh[key]
+            
+            # Update main ocr_result to be the primary one for reporting
+            ocr_result = primary_ocr_result
             
             # Check if mandatory fields are present
-            required_fields = processor.get_required_fields()
+            required_fields = self._get_required_fields(document_type)
             mandatory_fields_present = all(field in extracted_fields for field in required_fields)
             
-            # Validate fields (semantic)
-            semantic_validation = processor.validate_fields(extracted_fields)
-            semantic_score = semantic_validation['semantic_score']
+            # Simple validation scores (since we don't have processor methods)
+            # Semantic score based on field extraction success
+            semantic_score = len(extracted_fields) / max(len(required_fields), 1) if required_fields else 1.0
             
-            # Validate layout
-            layout_validation = processor.validate_layout(ocr_result, image_shape)
-            layout_score = layout_validation['layout_score']
+            # Layout score (simplified - based on OCR confidence)
+            layout_score = ocr_confidence_score
             
-            # Check consistency
-            consistency_validation = processor.check_consistency(extracted_fields)
-            consistency_score = consistency_validation['consistency_score']
+            # Consistency score (simplified - all fields present = high score)
+            consistency_score = 1.0 if mandatory_fields_present else 0.5
             
             # Stage 5: Advanced Validation Layer
             self.logger.debug("Stage 5: Post-OCR Validation")
@@ -326,20 +323,23 @@ class OCRPipeline:
             # 5.1 Token Normalization (in-place or separate? keeping raw text for now, using norm helper)
             # 5.2 Regex Score (implicit in semantic) -> we'll explicitly calculate one
             # Just approximation based on extracted vs required
-            regex_score = len(extracted_fields) / len(processor.get_required_fields()) if processor.get_required_fields() else 1.0
+            regex_score = len(extracted_fields) / max(len(required_fields), 1) if required_fields else 1.0
             
-            # 5.3 Fuzzy Anchors
-            fuzzy_score, anchor_details = self.anchor_validator.validate_anchors(ocr_result.full_text, document_type)
+            # 5.3 Fuzzy Anchors (use 'aadhaar' for all ID types as fallback)
+            anchor_doc_type = document_type if document_type in ['aadhaar', 'pan', 'vehicle_rc'] else 'aadhaar'
+            fuzzy_score, anchor_details = self.anchor_validator.validate_anchors(ocr_result.full_text, anchor_doc_type)
             
             # 5.4 Layout (already done)
             
             # 5.5 KV Proximity
-            kv_score = self.kv_extractor.validate_kv_pairs(ocr_result, document_type)
+            kv_doc_type = document_type if document_type in ['aadhaar', 'pan', 'vehicle_rc'] else 'aadhaar'
+            kv_score = self.kv_extractor.validate_kv_pairs(ocr_result, kv_doc_type)
             
             # 5.6 Consistency (already done)
             
             # 5.7 Distribution
-            distribution_score, dist_metrics = self.distribution_analyzer.analyze(ocr_result.full_text, document_type)
+            dist_doc_type = document_type if document_type in ['aadhaar', 'pan', 'vehicle_rc'] else 'aadhaar'
+            distribution_score, dist_metrics = self.distribution_analyzer.analyze(ocr_result.full_text, dist_doc_type)
             
             # 5.8 Schema Completeness
             required_count = len(required_fields)
@@ -366,7 +366,8 @@ class OCRPipeline:
                     spatial_score = 1.0
             
             # 5.10 Business Rules
-            business_valid, business_reasons = self.business_rule_validator.validate(extracted_fields, document_type)
+            business_doc_type = document_type if document_type in ['aadhaar', 'pan', 'vehicle_rc'] else 'aadhaar'
+            business_valid, business_reasons = self.business_rule_validator.validate(extracted_fields, business_doc_type)
             if not business_valid:
                 self.logger.info(f"Business rule validation failed: {business_reasons}")
 
@@ -509,21 +510,43 @@ class OCRPipeline:
         
         return results
     
-    def _get_processor(self, document_type: str) -> BaseDocumentProcessor:
-        """Get appropriate document processor.
+    def _get_extractor(self, document_type: str):
+        """Get appropriate document extractor.
         
         Args:
             document_type: Type of document
             
         Returns:
-            Document processor instance
+            Document extractor instance
         """
-        if document_type == 'invoice':
-            return self.invoice_processor
-        elif document_type == 'id_document':
-            return self.id_processor
+        if document_type == 'aadhaar':
+            return self.aadhaar_extractor
+        elif document_type == 'pan':
+            return self.pan_extractor
+        elif document_type == 'vehicle_rc':
+            return self.vehicle_rc_extractor
         else:
-            raise ValueError(f"Unknown document type: {document_type}")
+            # Default to aadhaar for unknown types
+            self.logger.warning(f"Unknown document type: {document_type}, defaulting to aadhaar extractor")
+            return self.aadhaar_extractor
+    
+    def _get_required_fields(self, document_type: str) -> List[str]:
+        """Get required fields for document type.
+        
+        Args:
+            document_type: Type of document
+            
+        Returns:
+            List of required field names
+        """
+        required_fields_map = {
+            'aadhaar': ['aadhaar_number', 'name', 'date_of_birth'],
+            'pan': ['pan_number', 'name', 'date_of_birth'],
+            'vehicle_rc': ['registration_number', 'owner_name']
+        }
+        
+        return required_fields_map.get(document_type, ['id_number', 'name'])
+
     
     def _calculate_non_alphanumeric_ratio(self, text: str) -> float:
         """Calculate ratio of non-alphanumeric characters.
@@ -548,9 +571,9 @@ def main():
     import argparse
     import json
     
-    parser = argparse.ArgumentParser(description='OCR Pipeline for Invoice and ID Documents')
+    parser = argparse.ArgumentParser(description='OCR Pipeline for Indian Documents (Aadhaar, PAN, Vehicle RC)')
     parser.add_argument('image_path', help='Path to document image')
-    parser.add_argument('--type', choices=['invoice', 'id_document', 'auto'], default='auto',
+    parser.add_argument('--type', choices=['aadhaar', 'pan', 'vehicle_rc', 'auto'], default='auto',
                        help='Document type (default: auto)')
     parser.add_argument('--config', default='config.yaml', help='Path to configuration file')
     parser.add_argument('--output', help='Output JSON file path')
