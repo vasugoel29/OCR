@@ -1,6 +1,6 @@
-# OCR Pipeline
+# Indian ID OCR Pipeline
 
-Production-ready OCR system for processing invoices and ID documents with multi-stage validation, powered by PaddleOCR.
+A high-performance, self-hosted OCR system designed to extract structured data from Indian Identity Documents (Aadhaar, PAN, Vehicle RC). It utilizes a multi-layered approach involving image preprocessing, document detection, dual-pass OCR, and a 10-component validation system.
 
 ## Quick Start
 
@@ -11,54 +11,46 @@ Production-ready OCR system for processing invoices and ID documents with multi-
 pip install -r requirements.txt
 ```
 
-### Usage
+### Running the API Server
+
+The system provides a FastAPI-based server for processing images via URL:
+
+```bash
+python3 api_server.py
+```
+The server will be available at `http://localhost:8000`. You can use the `/ocr/process_url` endpoint.
+
+### Command Line Usage
 
 #### 1. Auto-Detect Document Type (Recommended)
-
-The pipeline automatically detects whether a document is an ID card or invoice:
+The pipeline automatically classifies the document type (Aadhaar, PAN, or RC):
 
 ```bash
 python3 -m src.pipeline document.jpg
 ```
 
-#### 2. Process ID Documents (Aadhaar, PAN, etc.)
-
-The system uses a specialized **Dual-Pass OCR** strategy for ID cards:
-1.  **Pass 1 (Standard)**: Initial OCR extraction.
-2.  **Pass 2 (Enhanced)**: High-resolution preprocessing with deskewing and adaptive thresholding.
-3.  **Merge**: Combines best results from both passes.
+#### 2. Process Specific Document Types
+You can force a specific extractor if needed:
 
 ```bash
-python3 -m src.pipeline aadhaar.jpg --type id_document
+# Aadhaar
+python3 -m src.pipeline aadhaar.jpg --type aadhaar
+
+# PAN Card
+python3 -m src.pipeline pan.jpg --type pan
+
+# Vehicle RC
+python3 -m src.pipeline rc.jpg --type vehicle_rc
 ```
 
-**Extracted Fields:**
-- `aadhaar_number` / `id_number`
-- `name`
-- `date_of_birth`
-- `gender`
-- `address` (if legible)
-- `vid` (Virtual ID)
-
-#### 3. Process Invoices
+#### 3. Debugging Features
+View raw OCR text or save the final extraction results:
 
 ```bash
-python3 -m src.pipeline invoice.jpg --type invoice
-```
-
-#### 4. Debug with Raw Text Output
-
-View the raw OCR text extracted from the document:
-
-```bash
+# Show extracted text in console
 python3 -m src.pipeline document.jpg --show-text
-```
 
-#### 5. JSON Output
-
-Save full results to a JSON file:
-
-```bash
+# Save JSON results
 python3 -m src.pipeline document.jpg --output result.json
 ```
 
@@ -68,96 +60,60 @@ python3 -m src.pipeline document.jpg --output result.json
 from src.pipeline import OCRPipeline
 
 # Initialize pipeline
-pipeline = OCRPipeline('config.yaml')
+pipeline = OCRPipeline()
 
 # Process with auto-detection
 result = pipeline.process_document('document.jpg', document_type='auto')
 
 # Access results
 print(f"Decision: {result.decision}")
-print(f"Confidence: {result.confidence.final_score:.2f}")
+print(f"Confidence: {result.confidence.final_score:.3f}")
 print(f"Extracted Fields: {result.extracted_fields}")
-
-# Convert to dictionary for serialization
-result_dict = result.to_dict()
 ```
 
 ## Features
 
-### Core Capabilities
-- **PaddleOCR Engine**: High-accuracy OCR with support for English and Hindi
-- **Automatic Document Classification**: Detects ID documents vs invoices using keyword and pattern analysis
-- **Dual-Pass OCR for IDs**: Combines standard and enhanced preprocessing for optimal field extraction
-- **Robust Field Extraction**: Handles OCR noise (merged text, special characters, missing separators)
+### 🧠 Core Orchestration
+- **Dual-Pass OCR**: Intelligently combines standard and enhanced preprocessing passes to maximize extraction accuracy.
+- **Multilingual Support**: Supports English and Hindi/Devanagari text extraction with specialized numeral normalization.
+- **Document Classification**: Automatically identifies document types based on keyword frequency and spatial patterns.
 
-### Advanced Validation
-- **9-Component Confidence Scoring**:
-  - Image Quality Score
-  - OCR Confidence Score
-  - Regex Pattern Match Score
-  - Fuzzy Matching Score
-  - Layout Analysis Score
-  - Key-Value Pair Score
-  - Cross-Field Consistency Score
-  - Schema Compliance Score
-  - Token Distribution Score
+### 📉 10-Component Scoring Model
+The system explains its decisions via a weighted confidence score [0-1] based on:
+1.  **Image Quality**: Blur, brightness, and contrast checks.
+2.  **OCR Confidence**: Character-level metadata from PaddleOCR.
+3.  **Regex Pattern Match**: Verification against strict document formats.
+4.  **Fuzzy Matching**: Anchor word detection (e.g., "Father's Name").
+5.  **Layout Analysis**: Verification of physical field locations.
+6.  **Key-Value Pair Proximity**: Spatial relationship between keys and values.
+7.  **Cross-Field Consistency**: Logical checks between related fields.
+8.  **Schema Compliance**: Ensuring all mandatory fields are found.
+9.  **Token Distribution**: Analysis of numeric vs. alphabetic ratios.
+10. **Spatial Compactness**: Prevents cross-region mixing of fields.
 
-- **Multi-Stage Decision Engine**:
-  - `accept`: High confidence (≥0.85)
-  - `review`: Medium confidence (0.60-0.85) - requires manual review
-  - `reject`: Low confidence or failed validation
-
-### Image Preprocessing
-- **Quality Gate**: Checks blur, brightness, contrast, and edge density
-- **ID Enhancement**: High-resolution upscaling (1600px), denoising, CLAHE contrast enhancement
-- **Deskewing**: Hough Line Transform for rotation correction
-
-## Configuration
-
-Edit `config.yaml` to adjust thresholds:
-
-```yaml
-decision:
-  accept_threshold: 0.85    # Auto-accept confidence
-  review_threshold: 0.60    # Flag for manual review
-
-paddle_ocr:
-  lang: 'en'                # Language model
-  use_angle_cls: true       # Enable rotation detection
-  use_gpu: false            # Set to true if GPU available
-
-quality:
-  min_blur_score: 100.0     # Minimum sharpness
-  min_brightness: 20        # Brightness range
-  max_brightness: 240
-```
-
-## Troubleshooting
-
-- **Low Confidence Scores**: 
-  - Ensure image is in focus (`blur_score > 100`)
-  - Ensure good contrast (`contrast_score > 0.2`)
-  - Check image resolution (minimum 640x480)
-- **Wrong Classification**: Use `--type` to force document type
-- **Missing Fields**: Check logs for extraction details, use `--show-text` to inspect raw OCR output
+### 🖼️ Image Intelligence
+- **Quality Gate**: Rejects blurry or poorly lit images before heavy processing.
+- **Auto-Deskewing**: Hough line transform to correct rotated documents.
+- **ID Enhancer**: Specialized filters to sharpen small fonts and improve contrast.
 
 ## Project Structure
 
 ```
-OCR/
-├── config.yaml              # Configuration settings
+OCR-Paddle/
+├── api_server.py            # FastAPI service entry point
+├── config.yaml              # Thresholds and model configurations
 ├── src/                    
-│   ├── pipeline.py          # Main orchestration
+│   ├── pipeline.py          # Main orchestration logic
 │   ├── classification.py    # Document type detection
-│   ├── preprocessing/       # Image enhancement (id_enhancer.py)
-│   ├── documents/           # Field extractors (aadhaar.py, invoice.py)
-│   ├── ocr/                 # PaddleOCR wrapper
-│   ├── quality/             # Image quality assessment
-│   ├── scoring/             # Confidence scoring & decision engine
-│   └── validation/          # Post-OCR validation modules
-└── tests/                   # Unit tests
+│   ├── documents/           # Extractors (aadhaar.py, pan.py, vehicle_rc.py)
+│   ├── ocr/                 # PaddleOCR wrapper and engine
+│   ├── preprocessing/       # Image correction and enhancement
+│   ├── quality/             # Assessment of blur/brightness
+│   ├── scoring/             # Weighted confidence & decision logic
+│   ├── validation/          # Normalization and business rules
+│   └── utils.py             # Common image and text utilities
+└── tests/                   # Verification suite
 ```
 
 ## License
-
 MIT License
