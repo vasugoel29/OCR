@@ -18,7 +18,11 @@ The system provides a FastAPI-based server for processing images via URL:
 ```bash
 python3 api_server.py
 ```
-The server will be available at `http://localhost:8000`. You can use the `/ocr/process_url` endpoint.
+The server will be available at `http://localhost:8000`.
+
+**Endpoints:**
+- `POST /ocr/process_url`: Standard endpoint. Automatically detects type unless `document_type` is provided in the JSON body.
+- `POST /ocr/process_url/{doc_type}`: Explicitly sets the document type (e.g., `/ocr/process_url/aadhaar`).
 
 ### Command Line Usage
 
